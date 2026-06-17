@@ -1,0 +1,18 @@
+{
+  "name": "proxmox-cloud-bot",
+  "version": "1.0.0",
+  "description": "Slack bot for Proxmox VM provisioning",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.17.1",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}

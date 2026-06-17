@@ -1,0 +1,44 @@
+name: Delete VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      vm_name:
+        description: 'VM name to delete'
+        required: true
+        type: string
+      slack_user_id:
+        description: 'Slack user ID (only owner can delete their VM)'
+        required: true
+        type: string
+
+jobs:
+  delete:
+    runs-on: self-hosted
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Delete VM on Proxmox
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          chmod +x scripts/delete-vm.sh
+          bash scripts/delete-vm.sh \
+            "${{ inputs.vm_name }}" \
+            "${{ inputs.slack_user_id }}"
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          curl -sf -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg ch "${{ inputs.slack_user_id }}" \
+              --arg vm "${{ inputs.vm_name }}" \
+              '{channel: $ch, text: (":x: Failed to delete VM `" + $vm + "`. Check the Actions run for details.")}')"

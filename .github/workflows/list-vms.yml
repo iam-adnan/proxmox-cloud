@@ -1,0 +1,37 @@
+name: List VMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      slack_user_id:
+        description: 'Slack user ID'
+        required: true
+        type: string
+
+jobs:
+  list:
+    runs-on: self-hosted
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: List VMs
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          chmod +x scripts/list-vms.sh
+          bash scripts/list-vms.sh "${{ inputs.slack_user_id }}"
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          curl -sf -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg ch "${{ inputs.slack_user_id }}" \
+              '{channel: $ch, text: ":x: Could not retrieve VM list. Please try again."}')"

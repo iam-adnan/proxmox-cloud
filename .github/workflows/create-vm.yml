@@ -1,0 +1,59 @@
+name: Create VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      os_type:
+        description: 'OS type (ubuntu | amazon-linux | windows-server)'
+        required: true
+        type: choice
+        options:
+          - ubuntu
+          - amazon-linux
+          - windows-server
+      vm_name:
+        description: 'VM name (3–20 chars, lowercase alphanumeric + hyphens)'
+        required: true
+        type: string
+      slack_user_id:
+        description: 'Slack user ID to DM results to'
+        required: true
+        type: string
+
+jobs:
+  create:
+    runs-on: self-hosted
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create VM on Proxmox
+        id: vm
+        env:
+          PROXMOX_NODE: ${{ secrets.PROXMOX_NODE }}
+          PROXMOX_STORAGE: ${{ secrets.PROXMOX_STORAGE }}
+          PROXMOX_UBUNTU_TEMPLATE_ID: ${{ secrets.PROXMOX_UBUNTU_TEMPLATE_ID }}
+          PROXMOX_AMAZON_LINUX_TEMPLATE_ID: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
+          PROXMOX_WINDOWS_TEMPLATE_ID: ${{ secrets.PROXMOX_WINDOWS_TEMPLATE_ID }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          chmod +x scripts/create-vm.sh
+          bash scripts/create-vm.sh \
+            "${{ inputs.os_type }}" \
+            "${{ inputs.vm_name }}" \
+            "${{ inputs.slack_user_id }}"
+
+      - name: Notify Slack on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          curl -sf -X POST "https://slack.com/api/chat.postMessage" \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg ch "${{ inputs.slack_user_id }}" \
+              --arg vm "${{ inputs.vm_name }}" \
+              '{channel: $ch, text: (":x: Failed to create VM `" + $vm + "`. Check the Actions run for details or contact an administrator.")}')"
