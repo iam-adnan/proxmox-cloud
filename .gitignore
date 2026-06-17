@@ -1,4 +1,5 @@
 node_modules/
-slack-bot/.env
+lambda/.env
 *.pem
 *.key
+lambda/function.zip
