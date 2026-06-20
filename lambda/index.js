@@ -92,10 +92,21 @@ exports.handler = async (event) => {
     Object.entries(event.headers || {}).map(([k, v]) => [k.toLowerCase(), v])
   );
 
-  const rawBody = event.body || '';
+  // Lambda Function URL may base64-encode the body — decode it first so the
+  // HMAC is computed on the original raw bytes that Slack signed.
+  const rawBody = event.isBase64Encoded
+    ? Buffer.from(event.body || '', 'base64').toString('utf-8')
+    : (event.body || '');
 
   if (!verifySlackSignature(headers, rawBody)) {
-    return { statusCode: 401, body: 'Unauthorized' };
+    console.error('Signature verification failed', {
+      hasTimestamp: !!headers['x-slack-request-timestamp'],
+      hasSignature: !!headers['x-slack-signature'],
+      bodyLength: rawBody.length,
+      isBase64Encoded: event.isBase64Encoded,
+    });
+    // Return 200 with error text — Slack treats non-200 as "app did not respond"
+    return ephemeral(':x: Request verification failed. Check SLACK_SIGNING_SECRET.');
   }
 
   const params = Object.fromEntries(new URLSearchParams(rawBody));
