@@ -8,7 +8,7 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 12
     steps:
-      - name: Inspect guest networking via guest-exec
+      - name: Test net.ifnames=0 NIC fix on a linked clone
         env:
           AL_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
           STORAGE: ${{ secrets.PROXMOX_STORAGE }}
@@ -26,8 +26,10 @@ jobs:
           DISK_PATH="$(pvesm path "$(qm config "$DBG" | sed -n 's/^scsi0: \([^,]*\).*/\1/p')")"
           export LIBGUESTFS_BACKEND=direct
 
-          # Override qemu-ga to drop the default RPC blacklist so guest-exec works.
+          # Candidate fix: force legacy eth0 naming so the image's ifcfg-eth0
+          # matches the NIC. Also drop qemu-ga RPC blacklist so we can inspect.
           virt-customize -a "$DISK_PATH" \
+            --run-command 'grubby --update-kernel=ALL --args="net.ifnames=0 biosdevname=0"' \
             --run-command 'mkdir -p /etc/systemd/system/qemu-guest-agent.service.d' \
             --run-command "printf '[Service]\nExecStart=\nExecStart=/usr/bin/qemu-ga --method=virtio-serial --path=/dev/virtio-ports/org.qemu.guest_agent.0\n' > /etc/systemd/system/qemu-guest-agent.service.d/override.conf"
 
@@ -37,15 +39,19 @@ jobs:
           echo ">> started; waiting for agent..."
           for i in $(seq 1 30); do sleep 10; qm agent "$DBG" ping >/dev/null 2>&1 && { echo "agent up ~$((i*10))s"; break; }; done
 
+          echo ">> polling for IP..."
+          for i in $(seq 1 24); do
+            IP=$(qm guest cmd "$DBG" network-get-interfaces 2>/dev/null | jq -r '[.[]|select(.name|test("^(eth|ens|enp)"))|.["ip-addresses"][]?|select(.["ip-address-type"]=="ipv4")|.["ip-address"]|select(test("^127.")|not)]|first // empty' 2>/dev/null)
+            echo "t=$((i*10))s ip='${IP}'"
+            [ -n "$IP" ] && { echo ">> GOT IP: $IP"; break; }
+            sleep 10
+          done
+
           gx() { echo "### $*"; qm guest exec "$DBG" -- /bin/sh -c "$*" 2>&1; echo; }
-          gx 'uname -r; cat /etc/os-release | head -2'
-          gx 'ip -br link; echo ---; ip -br addr'
-          gx 'lspci | grep -i net; lsmod | grep -i virtio'
-          gx 'nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device 2>&1; echo ---; networkctl --no-pager 2>&1'
-          gx 'ls -l /etc/NetworkManager/system-connections/ 2>&1; ls /etc/sysconfig/network-scripts/ 2>&1'
-          gx 'cloud-init query platform 2>&1; cloud-init query datasource 2>&1; grep -rh datasource_list /etc/cloud/ 2>&1'
-          gx 'cat /run/cloud-init/result.json 2>&1'
-          gx 'journalctl -u NetworkManager --no-pager 2>&1 | tail -20'
+          gx 'cat /proc/cmdline'
+          gx 'ip -br addr'
+          gx 'cat /etc/sysconfig/network-scripts/ifcfg-eth0 2>&1'
+          gx 'systemctl is-active NetworkManager network systemd-networkd 2>&1'
 
           echo "=== cleanup ==="
           qm stop "$DBG" --skiplock >/dev/null 2>&1 || true
