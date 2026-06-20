@@ -30,11 +30,17 @@ jobs:
           if ! command -v virt-customize >/dev/null 2>&1; then
             echo ">> Installing libguestfs-tools..."
             export DEBIAN_FRONTEND=noninteractive
-            # The enterprise PVE repo 401s without a subscription; the Debian
-            # repos (which carry libguestfs-tools) update fine, so don't let
-            # the enterprise-repo error abort the install.
-            apt-get update -y || echo "WARN: apt-get update had errors (continuing)"
+            # The enterprise PVE/Ceph repos 401 without a subscription and break
+            # apt. Temporarily disable any source referencing them, install from
+            # the Debian repos, then restore.
+            DISABLED=""
+            for f in $(grep -rlE "enterprise\.proxmox\.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true); do
+              mv "$f" "$f.disabled" && DISABLED="$DISABLED $f"
+            done
+            echo ">> Temporarily disabled apt sources:${DISABLED:- none}"
+            apt-get update -y
             apt-get install -y libguestfs-tools
+            for f in $DISABLED; do mv "$f.disabled" "$f" 2>/dev/null || true; done
           fi
 
           # 2. Clean any previous attempt at NEW_ID
