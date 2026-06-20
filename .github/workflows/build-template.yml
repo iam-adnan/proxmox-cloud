@@ -30,7 +30,10 @@ jobs:
           if ! command -v virt-customize >/dev/null 2>&1; then
             echo ">> Installing libguestfs-tools..."
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -y
+            # The enterprise PVE repo 401s without a subscription; the Debian
+            # repos (which carry libguestfs-tools) update fine, so don't let
+            # the enterprise-repo error abort the install.
+            apt-get update -y || echo "WARN: apt-get update had errors (continuing)"
             apt-get install -y libguestfs-tools
           fi
 
