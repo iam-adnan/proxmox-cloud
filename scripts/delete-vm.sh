@@ -30,7 +30,6 @@ for VMID in "${VMIDS[@]}"; do
   # Proxmox percent-encodes the description in `qm config` output, so URL-decode
   # before parsing the JSON.
   DESC="$(qm config "$VMID" | grep '^description:' | sed 's/^description: //' || true)"
-  echo "DIAG VMID=$VMID raw description: ${DESC}"
   OWNER="$(printf '%s' "$DESC" | python3 -c "import json,sys,urllib.parse; d=json.loads(urllib.parse.unquote(sys.stdin.read())); print(d.get('slack_user_id',''))" 2>/dev/null || true)"
 
   if [ "$OWNER" != "$SLACK_USER_ID" ]; then

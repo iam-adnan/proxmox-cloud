@@ -23,7 +23,7 @@ on:
 jobs:
   create:
     runs-on: self-hosted
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Checkout

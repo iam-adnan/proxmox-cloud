@@ -13,10 +13,11 @@ while IFS= read -r VMID; do
   TAGS="$(qm config "$VMID" 2>/dev/null | grep '^tags:' | sed 's/^tags: //' || true)"
   echo "$TAGS" | grep -q "proxmox-cloud" || continue
 
-  # Parse metadata from description
+  # Parse metadata from description. Proxmox percent-encodes the description in
+  # `qm config` output, so URL-decode before parsing the JSON.
   DESC="$(qm config "$VMID" 2>/dev/null | grep '^description:' | sed 's/^description: //' || true)"
-  OWNER="$(echo "$DESC" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('slack_user_id',''))" 2>/dev/null || true)"
-  OS="$(echo "$DESC" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('os_type','unknown'))" 2>/dev/null || true)"
+  OWNER="$(printf '%s' "$DESC" | python3 -c "import json,sys,urllib.parse; d=json.loads(urllib.parse.unquote(sys.stdin.read())); print(d.get('slack_user_id',''))" 2>/dev/null || true)"
+  OS="$(printf '%s' "$DESC" | python3 -c "import json,sys,urllib.parse; d=json.loads(urllib.parse.unquote(sys.stdin.read())); print(d.get('os_type','unknown'))" 2>/dev/null || true)"
 
   [ "$OWNER" = "$SLACK_USER_ID" ] || continue
 
