@@ -1,0 +1,47 @@
+name: Agent Check (temporary)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: self-hosted
+    timeout-minutes: 12
+    steps:
+      - name: Probe guest agent on a linked clone
+        env:
+          AL_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
+          STORAGE: ${{ secrets.PROXMOX_STORAGE }}
+        run: |
+          set -uo pipefail
+          DBG=9200
+          STORAGE="${STORAGE:-local-lvm}"
+          echo ">> template=$AL_TEMPLATE debug-vmid=$DBG"
+
+          if qm status "$DBG" >/dev/null 2>&1; then
+            qm stop "$DBG" --skiplock >/dev/null 2>&1 || true
+            sleep 2
+            qm destroy "$DBG" --purge || true
+          fi
+
+          # Linked clone = near-instant (vs ~10 min full clone)
+          qm clone "$AL_TEMPLATE" "$DBG" --name agent-dbg
+          qm config "$DBG" | grep -q "cloudinit" || qm set "$DBG" --ide2 "${STORAGE}:cloudinit"
+          qm set "$DBG" --ciuser ec2-user --ipconfig0 ip=dhcp
+          echo "=== config ==="; qm config "$DBG" | grep -E "^(agent|net0|scsi0|ide2|ipconfig0):"
+          qm start "$DBG"
+          echo ">> started; polling..."
+
+          for i in $(seq 1 30); do
+            sleep 10
+            PING=$(qm agent "$DBG" ping >/dev/null 2>&1 && echo OK || echo FAIL)
+            IFACES=$(qm guest cmd "$DBG" network-get-interfaces 2>&1 | tr -d '\n' | head -c 500)
+            echo "t=$((i*10))s ping=$PING ifaces=${IFACES}"
+            [ "$PING" = "OK" ] && [ "$i" -ge 6 ] && break
+          done
+
+          echo "=== cleanup ==="
+          qm stop "$DBG" --skiplock >/dev/null 2>&1 || true
+          sleep 3
+          qm destroy "$DBG" --purge || true
+          echo ">> done"
