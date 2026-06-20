@@ -58,13 +58,15 @@ jobs:
           DISK_PATH="$(pvesm path "$DISK_REF")"
           echo ">> Customising $DISK_REF ($DISK_PATH)"
           export LIBGUESTFS_BACKEND=direct
-          # libguestfs can't auto-detect AL2023's package manager for --install,
-          # so install via a first-boot systemd unit that runs inside the real
-          # guest (where dnf + network exist). cloud-init clean makes clones
-          # re-initialise (fresh instance-id, ssh keys, etc.).
+          # libguestfs inspection classifies AL2023 as "unknown", so --install
+          # and --firstboot are unavailable. --run-command still works and the
+          # appliance has host network, so run the guest's own dnf to install
+          # the agent fully offline (no boot-time dependency). cloud-init clean
+          # makes clones re-initialise (fresh instance-id, ssh keys, etc.).
           virt-customize -a "$DISK_PATH" \
-            --run-command 'cloud-init clean --logs || true' \
-            --firstboot-command 'dnf -y install qemu-guest-agent && systemctl enable --now qemu-guest-agent'
+            --run-command 'dnf -y install qemu-guest-agent' \
+            --run-command 'systemctl enable qemu-guest-agent' \
+            --run-command 'cloud-init clean --logs || true'
 
           # 5. Convert to template
           qm template "$NEW_ID"
