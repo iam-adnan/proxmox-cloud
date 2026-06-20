@@ -43,17 +43,7 @@ jobs:
 
           for i in $(seq 1 30); do
             sleep 10
-            RAW=$(qm guest cmd "$DBG" network-get-interfaces 2>&1)
-            IP=$(printf '%s' "$RAW" | python3 -c "
-import json,sys
-try:
-    for f in json.load(sys.stdin):
-        if f.get('name','').startswith(('eth','ens','enp')):
-            for a in f.get('ip-addresses',[]):
-                if a.get('ip-address-type')=='ipv4' and not a['ip-address'].startswith('127.'):
-                    print(a['ip-address']); sys.exit()
-except Exception: pass
-" 2>/dev/null)
+            IP=$(qm guest cmd "$DBG" network-get-interfaces 2>/dev/null | jq -r '[.[]|select(.name|test("^(eth|ens|enp)"))|.["ip-addresses"][]?|select(.["ip-address-type"]=="ipv4")|.["ip-address"]|select(test("^127.")|not)]|first // empty' 2>/dev/null)
             echo "t=$((i*10))s ip='${IP}'"
             [ -n "$IP" ] && { echo ">> GOT IP: $IP"; break; }
           done
