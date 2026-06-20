@@ -1,30 +1,46 @@
-name: Rebuild AL2023 Template (temporary)
+name: Build AL2023 Cloud Template
 
-# One-shot: bake qemu-guest-agent into the Amazon Linux 2023 template by
-# offline-customising a clone of it, then converting that clone to a template.
+# Bake qemu-guest-agent + a systemd-networkd DHCP fix into an Amazon Linux 2023
+# template by offline-customising a full clone of a PRISTINE base template, then
+# converting it to a new template. After it finishes, point the
+# PROXMOX_AMAZON_LINUX_TEMPLATE_ID secret at the new VMID.
+#
+# src_id MUST be a pristine base image template (e.g. the original 9001), NOT the
+# one the secret currently points at — the source is consumed read-only but the
+# target VMID is destroyed/recreated, so src_id and new_id must differ.
 on:
   workflow_dispatch:
     inputs:
-      new_id:
-        description: 'VMID for the rebuilt template'
+      src_id:
+        description: 'Source (pristine base) template VMID to clone from'
         required: true
-        default: '9100'
+        default: '9001'
+        type: string
+      new_id:
+        description: 'VMID to create for the new template'
+        required: true
+        default: '9101'
         type: string
 
 jobs:
   build:
     runs-on: self-hosted
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: Bake guest agent into template
+      - name: Bake guest agent + DHCP fix into template
         env:
-          SRC_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
+          SRC_TEMPLATE: ${{ inputs.src_id }}
           NEW_ID: ${{ inputs.new_id }}
           STORAGE: ${{ secrets.PROXMOX_STORAGE }}
         run: |
           set -euo pipefail
           STORAGE="${STORAGE:-local-lvm}"
           echo ">> Source template: $SRC_TEMPLATE  ->  new template: $NEW_ID  (storage=$STORAGE)"
+
+          if [ "$SRC_TEMPLATE" = "$NEW_ID" ]; then
+            echo "ERROR: src_id and new_id must differ (new_id is destroyed then recreated)." >&2
+            exit 1
+          fi
 
           # 1. Tooling
           if ! command -v virt-customize >/dev/null 2>&1; then
