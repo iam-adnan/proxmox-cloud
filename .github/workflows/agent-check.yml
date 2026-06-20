@@ -34,11 +34,16 @@ jobs:
 
           for i in $(seq 1 30); do
             sleep 10
-            PING=$(qm agent "$DBG" ping >/dev/null 2>&1 && echo OK || echo FAIL)
-            IFACES=$(qm guest cmd "$DBG" network-get-interfaces 2>&1 | tr -d '\n' | head -c 500)
-            echo "t=$((i*10))s ping=$PING ifaces=${IFACES}"
-            [ "$PING" = "OK" ] && [ "$i" -ge 6 ] && break
+            qm agent "$DBG" ping >/dev/null 2>&1 && { echo "agent up after ~$((i*10))s"; break; }
           done
+
+          gx() { echo "### $*"; qm guest exec "$DBG" -- /bin/sh -c "$*" 2>&1; echo; }
+          gx 'ip -br addr'
+          gx 'cloud-init --version 2>&1; cloud-init query platform 2>/dev/null; cloud-init query datasource 2>/dev/null'
+          gx 'grep -rh datasource_list /etc/cloud/ 2>/dev/null'
+          gx 'nmcli -t -f DEVICE,STATE,CONNECTION device 2>/dev/null; networkctl --no-pager 2>/dev/null'
+          gx 'cat /run/cloud-init/result.json 2>/dev/null; ls /run/cloud-init 2>/dev/null'
+          gx 'journalctl -u cloud-init-local -u cloud-init -u NetworkManager --no-pager 2>/dev/null | tail -25'
 
           echo "=== cleanup ==="
           qm stop "$DBG" --skiplock >/dev/null 2>&1 || true
