@@ -67,11 +67,19 @@ jobs:
           # virtio-serial device-activation symlink, so the agent auto-starts on
           # the Proxmox VM (which has agent: enabled=1). cloud-init clean makes
           # clones re-initialise (fresh instance-id, ssh keys, etc.).
+          # NIC DHCP: this AL2023 image runs systemd-networkd, but the DHCP
+          # server replies unicast and networkd doesn't latch it; RequestBroadcast
+          # forces broadcast replies. Type=ether matches regardless of the NIC
+          # being named eth0 or ens18, and sorting before cloud-init's
+          # 10-cloud-init-eth0.network makes it authoritative.
+          NETCFG='[Match]\nType=ether\n\n[Network]\nDHCP=ipv4\n\n[DHCPv4]\nRequestBroadcast=yes\n'
+
           virt-customize -a "$DISK_PATH" \
             --run-command "printf '[alma9-appstream]\nname=alma9-appstream\nbaseurl=https://repo.almalinux.org/almalinux/9/AppStream/x86_64/os/\nenabled=0\ngpgcheck=0\n' > /etc/yum.repos.d/alma9.repo" \
             --run-command 'dnf --enablerepo=alma9-appstream install -y qemu-guest-agent' \
             --run-command 'systemctl enable qemu-guest-agent || true' \
             --run-command 'rm -f /etc/yum.repos.d/alma9.repo' \
+            --run-command "printf '${NETCFG}' > /etc/systemd/network/05-pve-dhcp.network" \
             --run-command 'cloud-init clean --logs || true'
 
           # 5. Convert to template
