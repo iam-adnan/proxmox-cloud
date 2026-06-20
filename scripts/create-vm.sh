@@ -86,7 +86,10 @@ while [ -z "$IP" ] && [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
   sleep 10
   ELAPSED=$((ELAPSED + 10))
 
-  IP="$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null | \
+  RAW="$(qm guest cmd "$VMID" network-get-interfaces 2>&1 || true)"
+  echo "DIAG[t=${ELAPSED}s] raw guest agent output: ${RAW}"
+
+  IP="$(printf '%s' "$RAW" | \
     python3 -c "
 import json, sys
 try:
@@ -107,6 +110,9 @@ done
 
 if [ -z "$IP" ]; then
   echo "ERROR: VM did not obtain an IP within ${MAX_WAIT}s." >&2
+  echo "DIAG ==== qm config ===="; qm config "$VMID" || true
+  echo "DIAG ==== qm status ===="; qm status "$VMID" || true
+  echo "DIAG ==== qm agent ping ===="; if qm agent "$VMID" ping; then echo "DIAG ping OK"; else echo "DIAG ping FAILED"; fi
   qm stop "$VMID" || true
   qm destroy "$VMID" --purge || true
   exit 1
