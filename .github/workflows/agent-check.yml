@@ -13,7 +13,7 @@ jobs:
           AL_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
           STORAGE: ${{ secrets.PROXMOX_STORAGE }}
         run: |
-          set -uo pipefail
+          set +e +o pipefail   # GHA runs with bash -e; we want to survive failing probes
           DBG=9200
           STORAGE="${STORAGE:-local-lvm}"
           echo ">> template=$AL_TEMPLATE debug-vmid=$DBG"
