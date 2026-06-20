@@ -1,0 +1,60 @@
+name: Rebuild AL2023 Template (temporary)
+
+# One-shot: bake qemu-guest-agent into the Amazon Linux 2023 template by
+# offline-customising a clone of it, then converting that clone to a template.
+on:
+  workflow_dispatch:
+    inputs:
+      new_id:
+        description: 'VMID for the rebuilt template'
+        required: true
+        default: '9100'
+        type: string
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Bake guest agent into template
+        env:
+          SRC_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
+          NEW_ID: ${{ inputs.new_id }}
+          STORAGE: ${{ secrets.PROXMOX_STORAGE }}
+        run: |
+          set -euo pipefail
+          STORAGE="${STORAGE:-local-lvm}"
+          echo ">> Source template: $SRC_TEMPLATE  ->  new template: $NEW_ID  (storage=$STORAGE)"
+
+          # 1. Tooling
+          if ! command -v virt-customize >/dev/null 2>&1; then
+            echo ">> Installing libguestfs-tools..."
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y libguestfs-tools
+          fi
+
+          # 2. Clean any previous attempt at NEW_ID
+          if qm status "$NEW_ID" >/dev/null 2>&1; then
+            echo ">> Removing existing VMID $NEW_ID"
+            qm stop "$NEW_ID" >/dev/null 2>&1 || true
+            qm destroy "$NEW_ID" --purge
+          fi
+
+          # 3. Full clone (writable disk we can customise)
+          qm clone "$SRC_TEMPLATE" "$NEW_ID" --name al2023-qga --full --storage "$STORAGE"
+
+          # 4. Resolve the scsi0 disk path and bake in the agent offline
+          DISK_REF="$(qm config "$NEW_ID" | sed -n 's/^scsi0: \([^,]*\).*/\1/p')"
+          DISK_PATH="$(pvesm path "$DISK_REF")"
+          echo ">> Customising $DISK_REF ($DISK_PATH)"
+          export LIBGUESTFS_BACKEND=direct
+          virt-customize -a "$DISK_PATH" \
+            --install qemu-guest-agent \
+            --run-command 'systemctl enable qemu-guest-agent' \
+            --run-command 'cloud-init clean --logs || true'
+
+          # 5. Convert to template
+          qm template "$NEW_ID"
+          echo ">> DONE. Rebuilt template is VMID $NEW_ID."
+          echo ">> Update the PROXMOX_AMAZON_LINUX_TEMPLATE_ID secret to $NEW_ID."
