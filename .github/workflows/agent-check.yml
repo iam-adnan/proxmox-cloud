@@ -8,12 +8,12 @@ jobs:
     runs-on: self-hosted
     timeout-minutes: 12
     steps:
-      - name: Probe guest agent on a linked clone
+      - name: Test NIC DHCP fix on a linked clone
         env:
           AL_TEMPLATE: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
           STORAGE: ${{ secrets.PROXMOX_STORAGE }}
         run: |
-          set +e +o pipefail   # GHA runs with bash -e; we want to survive failing probes
+          set +e +o pipefail   # GHA runs with bash -e; survive failing probes
           DBG=9200
           STORAGE="${STORAGE:-local-lvm}"
           echo ">> template=$AL_TEMPLATE debug-vmid=$DBG"
@@ -24,27 +24,42 @@ jobs:
             qm destroy "$DBG" --purge || true
           fi
 
-          # Linked clone = near-instant (vs ~10 min full clone)
           qm clone "$AL_TEMPLATE" "$DBG" --name agent-dbg
+          DISK_REF="$(qm config "$DBG" | sed -n 's/^scsi0: \([^,]*\).*/\1/p')"
+          DISK_PATH="$(pvesm path "$DISK_REF")"
+          export LIBGUESTFS_BACKEND=direct
+
+          # Candidate fix: a catch-all NetworkManager connection that DHCPs the
+          # primary ethernet regardless of the EC2-tailored image config.
+          virt-customize -a "$DISK_PATH" \
+            --run-command 'mkdir -p /etc/NetworkManager/system-connections' \
+            --run-command "printf '[connection]\nid=pve-dhcp\ntype=ethernet\nautoconnect=true\nautoconnect-priority=99\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n' > /etc/NetworkManager/system-connections/pve-dhcp.nmconnection" \
+            --run-command 'chmod 600 /etc/NetworkManager/system-connections/pve-dhcp.nmconnection'
+
           qm config "$DBG" | grep -q "cloudinit" || qm set "$DBG" --ide2 "${STORAGE}:cloudinit"
           qm set "$DBG" --ciuser ec2-user --ipconfig0 ip=dhcp
-          echo "=== config ==="; qm config "$DBG" | grep -E "^(agent|net0|scsi0|ide2|ipconfig0):"
           qm start "$DBG"
-          echo ">> started; polling..."
+          echo ">> started; polling for an IP..."
 
           for i in $(seq 1 30); do
             sleep 10
-            qm agent "$DBG" ping >/dev/null 2>&1 && { echo "agent up after ~$((i*10))s"; break; }
+            RAW=$(qm guest cmd "$DBG" network-get-interfaces 2>&1)
+            IP=$(printf '%s' "$RAW" | python3 -c "
+import json,sys
+try:
+    for f in json.load(sys.stdin):
+        if f.get('name','').startswith(('eth','ens','enp')):
+            for a in f.get('ip-addresses',[]):
+                if a.get('ip-address-type')=='ipv4' and not a['ip-address'].startswith('127.'):
+                    print(a['ip-address']); sys.exit()
+except Exception: pass
+" 2>/dev/null)
+            echo "t=$((i*10))s ip='${IP}'"
+            [ -n "$IP" ] && { echo ">> GOT IP: $IP"; break; }
           done
 
-          gx() { echo "### $*"; qm guest exec "$DBG" -- /bin/sh -c "$*" 2>&1; echo; }
-          gx 'ip -br addr'
-          gx 'cloud-init --version 2>&1; cloud-init query platform 2>/dev/null; cloud-init query datasource 2>/dev/null'
-          gx 'grep -rh datasource_list /etc/cloud/ 2>/dev/null'
-          gx 'nmcli -t -f DEVICE,STATE,CONNECTION device 2>/dev/null; networkctl --no-pager 2>/dev/null'
-          gx 'cat /run/cloud-init/result.json 2>/dev/null; ls /run/cloud-init 2>/dev/null'
-          gx 'journalctl -u cloud-init-local -u cloud-init -u NetworkManager --no-pager 2>/dev/null | tail -25'
-
+          echo "=== final interfaces ==="
+          qm guest cmd "$DBG" network-get-interfaces 2>&1 | tr -d '\n' | head -c 700; echo
           echo "=== cleanup ==="
           qm stop "$DBG" --skiplock >/dev/null 2>&1 || true
           sleep 3
