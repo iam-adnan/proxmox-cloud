@@ -58,14 +58,20 @@ jobs:
           DISK_PATH="$(pvesm path "$DISK_REF")"
           echo ">> Customising $DISK_REF ($DISK_PATH)"
           export LIBGUESTFS_BACKEND=direct
-          # libguestfs inspection classifies AL2023 as "unknown", so --install
-          # and --firstboot are unavailable. --run-command still works and the
-          # appliance has host network, so run the guest's own dnf to install
-          # the agent fully offline (no boot-time dependency). cloud-init clean
-          # makes clones re-initialise (fresh instance-id, ssh keys, etc.).
+          # AL2023 ships no qemu-guest-agent in its repos and can't use EPEL,
+          # but the EL9 build (AlmaLinux 9 AppStream) installs and runs on it
+          # (verified on a live AL2023 instance). libguestfs classifies AL2023
+          # as "unknown" so --install/--firstboot are unavailable, but
+          # --run-command works and the appliance has host network, so run the
+          # guest's own dnf offline. The package's %post creates the
+          # virtio-serial device-activation symlink, so the agent auto-starts on
+          # the Proxmox VM (which has agent: enabled=1). cloud-init clean makes
+          # clones re-initialise (fresh instance-id, ssh keys, etc.).
           virt-customize -a "$DISK_PATH" \
-            --run-command 'dnf -y install qemu-guest-agent' \
-            --run-command 'systemctl enable qemu-guest-agent' \
+            --run-command "printf '[alma9-appstream]\nname=alma9-appstream\nbaseurl=https://repo.almalinux.org/almalinux/9/AppStream/x86_64/os/\nenabled=0\ngpgcheck=0\n' > /etc/yum.repos.d/alma9.repo" \
+            --run-command 'dnf --enablerepo=alma9-appstream install -y qemu-guest-agent' \
+            --run-command 'systemctl enable qemu-guest-agent || true' \
+            --run-command 'rm -f /etc/yum.repos.d/alma9.repo' \
             --run-command 'cloud-init clean --logs || true'
 
           # 5. Convert to template

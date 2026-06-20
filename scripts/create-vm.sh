@@ -70,40 +70,6 @@ if [ "$OS_TYPE" != "windows-server" ]; then
     --sshkeys "${KEY_FILE}.pub" \
     --ipconfig0 ip=dhcp
 
-  # Stock cloud images (notably Amazon Linux 2023) ship without
-  # qemu-guest-agent, which IP discovery below depends on. Inject a cloud-init
-  # *vendor-data* snippet that installs and starts it on first boot. vendor-data
-  # is additive — it does NOT override the user/ssh/network data set above.
-  SNIPPET_STORAGE="${PROXMOX_SNIPPET_STORAGE:-local}"
-  SNIPPET_REL="snippets/proxmox-cloud-qga.yaml"
-
-  STORE_PATH="$(pvesh get "/storage/${SNIPPET_STORAGE}" --output-format json 2>/dev/null \
-    | python3 -c "import json,sys; print(json.load(sys.stdin).get('path',''))" 2>/dev/null || true)"
-  CONTENT="$(pvesh get "/storage/${SNIPPET_STORAGE}" --output-format json 2>/dev/null \
-    | python3 -c "import json,sys; print(json.load(sys.stdin).get('content',''))" 2>/dev/null || true)"
-
-  if [ -n "$STORE_PATH" ]; then
-    # Enable the 'snippets' content type if it isn't already (idempotent).
-    case ",${CONTENT}," in
-      *,snippets,*) ;;
-      *) pvesm set "${SNIPPET_STORAGE}" --content "${CONTENT:+${CONTENT},}snippets" ;;
-    esac
-
-    mkdir -p "${STORE_PATH}/snippets"
-    cat > "${STORE_PATH}/snippets/proxmox-cloud-qga.yaml" <<'YAML'
-#cloud-config
-package_update: true
-packages:
-  - qemu-guest-agent
-runcmd:
-  - [ systemctl, enable, --now, qemu-guest-agent ]
-YAML
-
-    qm set "$VMID" --cicustom "vendor=${SNIPPET_STORAGE}:${SNIPPET_REL}"
-  else
-    echo "WARN: storage '${SNIPPET_STORAGE}' not found; skipping guest-agent auto-install." >&2
-  fi
-
   SSH_KEY_CONTENT="$(cat "$KEY_FILE")"
 fi
 
@@ -112,7 +78,7 @@ qm start "$VMID"
 echo ">> VM started — waiting for guest agent to report an IP..."
 
 # ── Wait for IP via QEMU guest agent ─────────────────────────────────────────
-# Allow time for cloud-init to install + start the agent on first boot.
+# Generous window to cover first boot, cloud-init, and DHCP on a busy host.
 MAX_WAIT=420
 ELAPSED=0
 IP=""
@@ -121,10 +87,7 @@ while [ -z "$IP" ] && [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
   sleep 10
   ELAPSED=$((ELAPSED + 10))
 
-  RAW="$(qm guest cmd "$VMID" network-get-interfaces 2>&1 || true)"
-  echo "DIAG[t=${ELAPSED}s] raw guest agent output: ${RAW}"
-
-  IP="$(printf '%s' "$RAW" | \
+  IP="$(qm guest cmd "$VMID" network-get-interfaces 2>/dev/null | \
     python3 -c "
 import json, sys
 try:
@@ -145,9 +108,6 @@ done
 
 if [ -z "$IP" ]; then
   echo "ERROR: VM did not obtain an IP within ${MAX_WAIT}s." >&2
-  echo "DIAG ==== qm config ===="; qm config "$VMID" || true
-  echo "DIAG ==== qm status ===="; qm status "$VMID" || true
-  echo "DIAG ==== qm agent ping ===="; if qm agent "$VMID" ping; then echo "DIAG ping OK"; else echo "DIAG ping FAILED"; fi
   qm stop "$VMID" || true
   qm destroy "$VMID" --purge || true
   exit 1
