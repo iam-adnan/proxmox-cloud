@@ -51,8 +51,12 @@ SSH_KEY_CONTENT=""
 SSH_PASS=""
 
 if [ "$OS_TYPE" != "windows-server" ]; then
-  KEY_FILE="$(mktemp /tmp/vm-key-XXXXXX)"
-  trap "rm -f ${KEY_FILE} ${KEY_FILE}.pub" EXIT
+  # Use a private temp *directory* — mktemp on a file would pre-create the path,
+  # and ssh-keygen then prompts "Overwrite (y/n)?" and aborts on the
+  # non-interactive runner. A fresh dir lets ssh-keygen create the key itself.
+  KEY_DIR="$(mktemp -d /tmp/vm-key-XXXXXX)"
+  KEY_FILE="${KEY_DIR}/id_ed25519"
+  trap "rm -rf ${KEY_DIR}" EXIT
 
   ssh-keygen -t ed25519 -f "$KEY_FILE" -C "proxmox-cloud@${VM_NAME}" -N "" -q
 
