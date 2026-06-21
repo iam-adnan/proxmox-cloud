@@ -19,6 +19,16 @@ on:
         description: 'Slack user ID to DM results to'
         required: true
         type: string
+      memory:
+        description: 'RAM in MB'
+        required: false
+        default: '2048'
+        type: string
+      disk_gb:
+        description: 'Disk size in GB (>= template size)'
+        required: false
+        default: '25'
+        type: string
 
 jobs:
   create:
@@ -43,7 +53,9 @@ jobs:
           bash scripts/create-vm.sh \
             "${{ inputs.os_type }}" \
             "${{ inputs.vm_name }}" \
-            "${{ inputs.slack_user_id }}"
+            "${{ inputs.slack_user_id }}" \
+            "${{ inputs.memory }}" \
+            "${{ inputs.disk_gb }}"
 
       - name: Notify Slack on failure
         if: failure()

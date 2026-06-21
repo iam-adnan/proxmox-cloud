@@ -1,11 +1,13 @@
 #!/bin/bash
 # Runs on the Proxmox host via self-hosted GitHub Actions runner.
-# Usage: create-vm.sh <os_type> <vm_name> <slack_user_id>
+# Usage: create-vm.sh <os_type> <vm_name> <slack_user_id> [memory_mb] [disk_gb]
 set -euo pipefail
 
 OS_TYPE="$1"
 VM_NAME="$2"
 SLACK_USER_ID="$3"
+MEMORY_MB="${4:-2048}"
+DISK_GB="${5:-25}"
 
 STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 NODE="${PROXMOX_NODE:-pve}"
@@ -32,13 +34,26 @@ esac
 
 # ── Get next available VMID ───────────────────────────────────────────────────
 VMID=$(pvesh get /cluster/nextid)
-echo ">> Creating VM '$VM_NAME' (VMID=$VMID, OS=$OS_TYPE, template=$TEMPLATE_ID)"
+echo ">> Creating VM '$VM_NAME' (VMID=$VMID, OS=$OS_TYPE, template=$TEMPLATE_ID, mem=${MEMORY_MB}MB, disk=${DISK_GB}GB)"
 
 # ── Clone template ────────────────────────────────────────────────────────────
 qm clone "$TEMPLATE_ID" "$VMID" \
   --name "$VM_NAME" \
   --full \
   --storage "$STORAGE"
+
+# ── Apply requested memory ───────────────────────────────────────────────────
+qm set "$VMID" --memory "$MEMORY_MB"
+
+# ── Grow the disk if a larger size was requested (qm can only grow, not shrink).
+# Template disk is 25G; cloud-init growpart expands the filesystem on first boot.
+CUR_GB="$(qm config "$VMID" | sed -n 's/^scsi0:.*size=\([0-9]\+\)G.*/\1/p')"
+if [ -n "$CUR_GB" ] && [ "$DISK_GB" -gt "$CUR_GB" ]; then
+  echo ">> Resizing scsi0 from ${CUR_GB}G to ${DISK_GB}G"
+  qm disk resize "$VMID" scsi0 "${DISK_GB}G"
+elif [ -n "$CUR_GB" ] && [ "$DISK_GB" -lt "$CUR_GB" ]; then
+  echo ">> Requested ${DISK_GB}G < template ${CUR_GB}G; keeping ${CUR_GB}G (cannot shrink)."
+fi
 
 # Store owner metadata in VM description so we can enforce per-user ops later
 CREATED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
