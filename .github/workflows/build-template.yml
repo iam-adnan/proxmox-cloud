@@ -96,6 +96,7 @@ jobs:
             --run-command 'systemctl enable qemu-guest-agent || true' \
             --run-command 'rm -f /etc/yum.repos.d/alma9.repo' \
             --run-command "printf '${NETCFG}' > /etc/systemd/network/05-pve-dhcp.network" \
+            --run-command "printf 'selinux:\n  selinux_no_reboot: true\n' > /etc/cloud/cloud.cfg.d/99-pve-no-selinux-reboot.cfg" \
             --run-command 'cloud-init clean --logs || true'
 
           # 5. Convert to template

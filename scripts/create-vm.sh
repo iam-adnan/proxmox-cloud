@@ -156,17 +156,44 @@ if [ "$OS_TYPE" = "windows-server" ]; then
 fi
 
 # ── Send Slack DM with credentials ───────────────────────────────────────────
+# Build the message with printf so escapes become REAL newlines (bash does not
+# expand \n inside double quotes; jq would then send literal "\n" to Slack).
 if [ "$OS_TYPE" = "windows-server" ]; then
-  CREDS_BLOCK="*User:* \`${SSH_USER}\`\n*Password:* \`${SSH_PASS}\`\n\n*Connect:*\n\`\`\`ssh ${SSH_USER}@${IP}\`\`\`"
+  CREDS_BLOCK="$(printf '*User:* `%s`\n*Password:* `%s`\n\n*Connect:*\n```\nssh %s@%s\n```' \
+    "$SSH_USER" "$SSH_PASS" "$SSH_USER" "$IP")"
 else
-  CREDS_BLOCK="*User:* \`${SSH_USER}\`\n\n*SSH Private Key* (save this — it won't be shown again):\n\`\`\`\n${SSH_KEY_CONTENT}\n\`\`\`\n\n*Connect:*\n\`\`\`ssh -i key.pem ${SSH_USER}@${IP}\`\`\`"
+  CREDS_BLOCK="$(printf '*User:* `%s`\n\n*SSH private key* — copy everything between the lines into a file `key.pem`, then `chmod 600 key.pem`:\n```\n%s```\n*Connect:*\n```\nssh -i key.pem %s@%s\n```' \
+    "$SSH_USER" "$SSH_KEY_CONTENT" "$SSH_USER" "$IP")"
 fi
 
-MSG=":white_check_mark: *Your VM is ready!*\n\n*Name:* \`${VM_NAME}\`\n*OS:* ${OS_TYPE}\n*IP:* \`${IP}\`\n\n${CREDS_BLOCK}"
+MSG="$(printf ':white_check_mark: *Your VM is ready!*\n\n*Name:* `%s`\n*OS:* %s\n*IP:* `%s`\n\n%s' \
+  "$VM_NAME" "$OS_TYPE" "$IP" "$CREDS_BLOCK")"
+
+# Also upload the private key as a downloadable .pem file (best effort).
+if [ "$OS_TYPE" != "windows-server" ] && [ -n "$SSH_KEY_CONTENT" ]; then
+  IM_CHANNEL="$(curl -sf -X POST "https://slack.com/api/conversations.open" \
+    -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H "Content-Type: application/json" \
+    -d "$(jq -n --arg u "$SLACK_USER_ID" '{users: $u}')" | jq -r '.channel.id // empty' 2>/dev/null || true)"
+  if [ -n "$IM_CHANNEL" ]; then
+    KEY_BYTES="$(printf '%s' "$SSH_KEY_CONTENT" | wc -c)"
+    UP_JSON="$(curl -sf -X POST "https://slack.com/api/files.getUploadURLExternal" \
+      -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+      --data-urlencode "filename=${VM_NAME}-key.pem" --data-urlencode "length=${KEY_BYTES}" 2>/dev/null || true)"
+    UP_URL="$(echo "$UP_JSON" | jq -r '.upload_url // empty' 2>/dev/null)"
+    FILE_ID="$(echo "$UP_JSON" | jq -r '.file_id // empty' 2>/dev/null)"
+    if [ -n "$UP_URL" ] && [ -n "$FILE_ID" ]; then
+      printf '%s' "$SSH_KEY_CONTENT" | curl -sf -X POST "$UP_URL" --data-binary @- >/dev/null 2>&1 || true
+      curl -sf -X POST "https://slack.com/api/files.completeUploadExternal" \
+        -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" -H "Content-Type: application/json" \
+        -d "$(jq -n --arg ch "$IM_CHANNEL" --arg id "$FILE_ID" --arg t "${VM_NAME}-key.pem" \
+          '{channel_id: $ch, files: [{id: $id, title: $t}]}')" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
 
 curl -sf -X POST "https://slack.com/api/chat.postMessage" \
   -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json; charset=utf-8" \
   -d "$(jq -n --arg ch "$SLACK_USER_ID" --arg txt "$MSG" '{channel: $ch, text: $txt, mrkdwn: true}')"
 
 echo ">> Done. Notified Slack user $SLACK_USER_ID."
