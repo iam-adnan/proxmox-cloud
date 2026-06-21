@@ -42,12 +42,23 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
 ## Components
 
 - **`lambda/index.js`** — the Slack entrypoint. Zero npm deps (Node 20 built-ins
-  `crypto` + `https` only). Verifies the Slack signing secret, parses the command,
-  validates input, and calls `workflow_dispatch`. Handles `/create-vm`,
-  `/delete-vm`, `/list-vms`.
-- **`.github/workflows/*.yml`** — one workflow per command, all `runs-on:
-  self-hosted`, each `workflow_dispatch` with typed inputs. They `chmod +x` and run
-  the matching script, and post a Slack failure DM on `if: failure()`.
+  `crypto` + `https` only). Verifies the Slack signing secret, then:
+  - `/create-vm` (no args) **opens a Slack modal** via `views.open` (name, OS
+    dropdown, memory GB, disk GB). The modal **submission** arrives as a
+    `view_submission` interaction payload to the *same* endpoint; the handler
+    validates it and calls `workflow_dispatch`. This needs `SLACK_BOT_TOKEN` in the
+    Lambda env **and** Slack **Interactivity** enabled (Request URL = the API
+    Gateway endpoint).
+  - `/delete-vm <name>`, `/list-vms` — plain text slash commands.
+- **`.github/workflows/create-vm.yml|delete-vm.yml|list-vms.yml`** — one workflow
+  per command, all `runs-on: self-hosted`, each `workflow_dispatch` with typed
+  inputs. They `chmod +x` and run the matching script, and post a Slack failure DM
+  on `if: failure()`.
+- **`.github/workflows/build-template.yml`** — one-off tool to (re)build an OS
+  template: full-clones a pristine base (`src_id`, default `9001`) to a new VMID
+  (`new_id`, default `9101`) and offline-customises it with libguestfs
+  `virt-customize` (see "Proxmox host facts"). `src_id` must differ from `new_id`
+  (the target is destroyed/recreated). Run on the self-hosted runner.
 - **`scripts/*.sh`** — run on the Proxmox host. This is where all Proxmox logic
   lives. They are the source of truth for provisioning behavior.
 
@@ -66,26 +77,39 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
   (`{"slack_user_id":...,"os_type":...,"created_at":...}`) plus a `proxmox-cloud`
   tag. `delete-vm.sh` enforces that only the creator can delete; `list-vms.sh`
   filters by this. If you change the JSON shape, update all three scripts.
+  **Proxmox percent-encodes the description** in `qm config` output (`:` → `%3A`),
+  so the scripts `urllib.parse.unquote` it before `json.loads` — without that the
+  owner parses empty and ownership checks silently fail.
 - **IP discovery** polls the QEMU guest agent
-  (`qm guest cmd <id> network-get-interfaces`) for up to 5 min. The VM template
-  MUST have the guest agent enabled or provisioning hangs then rolls back.
+  (`qm guest cmd <id> network-get-interfaces`) for up to ~7 min (`MAX_WAIT=420`).
+  The template MUST have the guest agent **running** (see template build) or
+  provisioning hangs then rolls back.
+- **Slack message text must use real newlines**, built with `printf` — bash does
+  NOT expand `\n` in double quotes, and `jq --arg` would then send literal `\n` to
+  Slack (renders as text). The SSH key is sent in a code block and also uploaded
+  as a downloadable `<name>-key.pem` (needs the bot `files:write` scope).
 - **VM name validation** is a strict regex (`^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$`)
   in both `lambda/index.js` and implied by the scripts. Treat all Slack input as
   untrusted.
 - **Slack signature failures return HTTP 200** with an error message in the body,
   not 401 — Slack renders any non-200 as "app did not respond", which hides the
   real cause. Keep this convention.
-- **Lambda Function URL may base64-encode the request body.** `index.js` checks
-  `event.isBase64Encoded` and decodes before computing the HMAC. If you skip this,
-  signature verification fails intermittently.
+- **API Gateway / Function URL may base64-encode the request body.** `index.js`
+  checks `event.isBase64Encoded` and decodes before computing the HMAC. If you skip
+  this, signature verification fails intermittently. The HMAC is computed on the
+  raw body, so it must be the exact bytes Slack signed.
 
 ## Secrets — where each one lives
 
 Two separate stores; do not mix them up.
 
 - **Lambda environment variables** (the Slack-facing half):
-  `SLACK_SIGNING_SECRET`, `GITHUB_TOKEN` (PAT needs the `workflow` scope to
-  dispatch), `GITHUB_OWNER`, `GITHUB_REPO`.
+  `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` (xoxb-…, needed for the `/create-vm`
+  modal `views.open`; `files:write` scope to also upload the key file),
+  `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`. The `GITHUB_TOKEN` MUST be able to
+  dispatch workflows — use a **classic PAT with `repo` + `workflow`**; a
+  fine-grained PAT without `actions: write` returns `403 Resource not accessible`
+  and the Slack reply is the generic "something went wrong".
 - **GitHub Actions repo secrets** (the Proxmox-facing half): `SLACK_BOT_TOKEN`
   (used by scripts to DM users), `PROXMOX_NODE`, `PROXMOX_STORAGE`, and one
   template-ID secret per OS: `PROXMOX_UBUNTU_TEMPLATE_ID`,
@@ -146,21 +170,51 @@ HTTP API** in front of the Lambda instead of a Function URL:
   and runs as a systemd service
   (`actions.runner.iam-adnan-proxmox-cloud.proxmox-pve`). It runs **as root**
   (registered with `RUNNER_ALLOW_RUNASROOT=1`) because `qm` requires root.
-- Host needs `jq`, `python3`, and `openssl` installed (scripts depend on them).
-- Storage: `local` (dir, ISOs/cloud-init) and `local-lvm` (lvmthin, VM disks).
-  Default bridge `vmbr0`. Templates are cloud-init-enabled with the guest agent on.
-- Templates are built by: download cloud image → `qm create` → `qm importdisk` →
-  attach as `scsi0` → add `--ide2 <storage>:cloudinit` → `qm template`. The
-  Amazon Linux 2023 template is VMID **9001**.
+- Host needs `jq`, `python3`, `openssl`, and `libguestfs-tools` (for
+  `virt-customize` in build-template) installed. Installing libguestfs needs the
+  enterprise PVE/Ceph apt repos (which 401 without a subscription) temporarily
+  disabled.
+- Storage: `local` (dir, ISOs/cloud-init/snippets) and `local-lvm` (lvmthin, VM
+  disks). Default bridge `vmbr0`. The thin pool is small (~20 GB) — full clones of
+  a 25 GB template are thin (~1.7 GB actual) but watch the cap.
+- **The PVE host is itself a VM nested inside VMware ESXi** (`systemd-detect-virt`
+  = vmware, vmxnet3 NIC). Inner VMs only get LAN/DHCP if the ESXi vSwitch/port
+  group security for the PVE VM's adapter is **Promiscuous Mode + MAC Address
+  Changes + Forged Transmits = Accept**. If those reset to default (Reject), every
+  VM stops getting an IP (DHCP DISCOVERs leave the guest but are dropped by ESXi).
+- **DHCP** must be served on the `vmbr0` segment (192.168.10.0/23, gateway/DHCP at
+  .2). `ip=dhcp` relies on it.
+
+### Templates — active VMID is **9101** (`PROXMOX_AMAZON_LINUX_TEMPLATE_ID`)
+
+`9001` is the **pristine base** (download cloud image → `qm create` → `importdisk`
+→ `scsi0` → `--ide2 cloudinit` → `qm template`). `9101` is built from `9001` by
+`build-template.yml`, which offline-`virt-customize`s the clone with three fixes
+the stock Amazon Linux 2023 cloud image needs to actually work on Proxmox — keep
+all three when rebuilding or adding an OS:
+1. **qemu-guest-agent**: AL2023 ships none and can't use EPEL; install the EL9
+   build from the **AlmaLinux 9 AppStream** repo (it installs and runs on AL2023).
+2. **DHCP**: write `/etc/systemd/network/05-pve-dhcp.network` with `[Match]
+   Type=ether` + `[DHCPv4] RequestBroadcast=yes`. The image uses systemd-networkd;
+   it won't latch the unicast DHCP offer without `RequestBroadcast`, and
+   `Type=ether` matches whether the NIC is named `eth0` or `ens18`.
+3. **No first-boot reboot**: write `/etc/cloud/cloud.cfg.d/99-pve-no-selinux-reboot.cfg`
+   = `selinux:\n  selinux_no_reboot: true`. Otherwise AL2023 `cc_selinux` runs a
+   `power_state: reboot` ~2 min into first boot of every clone; on Proxmox that
+   makes the QEMU process exit and the VM stays **stopped** (user gets working
+   creds for an off VM).
 
 ## When extending
 
-- **Adding an OS type** requires three coordinated edits: `VALID_OS` in
+- **Adding an OS type** requires: `VALID_OS` + `OS_LABELS` (modal dropdown) in
   `lambda/index.js`, the `case` block in `scripts/create-vm.sh` (template ID + SSH
-  user + auth method), and a new `PROXMOX_*_TEMPLATE_ID` GitHub secret + a built
-  template on the host.
+  user + auth method), a new `PROXMOX_*_TEMPLATE_ID` GitHub secret, and a built
+  template on the host (via `build-template.yml` with the three fixes above).
+- **Changing the create-vm form** (fields, validation) is done in the modal JSON
+  and `handleViewSubmission` in `lambda/index.js`; new fields must be threaded
+  through `create-vm.yml` inputs → `create-vm.sh` args (e.g. `memory`, `disk_gb`).
 - **Adding a command** requires a new workflow file, a new script, and a new
-  `app.command`/handler branch in `lambda/index.js` (plus a Slack slash command
-  pointed at the Function URL).
+  handler branch in `lambda/index.js` (plus a Slack slash command pointed at the
+  API Gateway endpoint).
 - Keep provisioning logic in the scripts, not the workflows — the workflows are
   thin wrappers.
