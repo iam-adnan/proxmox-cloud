@@ -114,11 +114,21 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
   `${{ inputs.note }}`, so `lambda/index.js` `sanitizeNote()` strips it to
   `[A-Za-z0-9 _.,:/()-]` (max 100 chars) before dispatch. Don't loosen this without
   re-checking the injection path. All other create inputs are allowlisted/numeric.
-- **Linux vs Windows auth differ.** Linux: generate an ephemeral ed25519 keypair,
-  inject the public key via cloud-init (`qm set --sshkeys`), DM the **private key**
-  once (never stored). Windows: set the Administrator password via
+- **Linux vs Windows auth differ.** Linux VMs: generate an ephemeral ed25519
+  keypair, inject the public key via cloud-init (`qm set --sshkeys`), AND set a
+  random password (`--cipassword`); DM both (key once, never stored). Containers:
+  inject the key (`pct --ssh-public-keys`) AND set a random root password
+  (`chpasswd` via `pct exec`). Windows: set the Administrator password via
   `qm guest exec ... powershell` and ensure OpenSSH Server is running; DM the
   password.
+- **SSH password auth is force-enabled** so the generated password works over SSH,
+  not just console/sudo. The Ubuntu cloud image ships
+  `/etc/ssh/sshd_config.d/60-cloudimg-settings.conf` = `PasswordAuthentication no`,
+  and **sshd uses the FIRST match**, so a `00-pve-password-auth.conf` drop-in
+  (`PasswordAuthentication yes`; containers also `PermitRootLogin yes`) wins. It's
+  baked into templates by the build workflows and also applied at create time
+  (`qm guest exec` for VMs — best-effort, AlmaLinux qemu-ga blocks guest-exec;
+  `pct exec` for containers). Password is alphanumeric (no shell-quoting hazards).
 - **Ownership metadata is stored in the VM/CT description** as JSON
   (`{"slack_user_id":...,"os_type":...,"created_at":...,"kind":"vm|ct","note":...}`)
   plus a `proxmox-cloud` tag. `kind` lets `delete-vm.sh`/`list-vms.sh` know whether

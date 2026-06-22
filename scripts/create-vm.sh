@@ -88,6 +88,10 @@ if [ "$OS_TYPE" != "windows-server" ]; then
 
   ssh-keygen -t ed25519 -f "$KEY_FILE" -C "proxmox-cloud@${VM_NAME}" -N "" -q
 
+  # Random password (alphanumeric, 20 chars) — usable for console/sudo and, once
+  # SSH password auth is enabled below, for SSH too. Set via cloud-init.
+  SSH_PASS="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)"
+
   # Ensure cloud-init drive exists on cloned VM
   if ! qm config "$VMID" | grep -q "^ide[0-9].*cloudinit"; then
     qm set "$VMID" --ide2 "${STORAGE}:cloudinit"
@@ -95,6 +99,7 @@ if [ "$OS_TYPE" != "windows-server" ]; then
 
   qm set "$VMID" \
     --ciuser "$SSH_USER" \
+    --cipassword "$SSH_PASS" \
     --sshkeys "${KEY_FILE}.pub" \
     --ipconfig0 ip=dhcp
 
@@ -143,6 +148,17 @@ fi
 
 echo ">> VM is reachable at $IP"
 
+# ── Linux: enable SSH password auth so the generated password works over SSH ─
+# The Ubuntu cloud image ships /etc/ssh/sshd_config.d/60-cloudimg-settings.conf
+# with PasswordAuthentication no; sshd uses the FIRST match, so a 00- drop-in
+# wins. Best-effort via the guest agent (the password also works for console/sudo
+# regardless; on guests where guest-exec is unavailable the key still works).
+if [ "$OS_TYPE" != "windows-server" ]; then
+  qm guest exec "$VMID" -- bash -c \
+    'mkdir -p /etc/ssh/sshd_config.d; printf "PasswordAuthentication yes\n" > /etc/ssh/sshd_config.d/00-pve-password-auth.conf; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true' \
+    >/dev/null 2>&1 || true
+fi
+
 # ── Windows: set password + enable OpenSSH via guest agent ───────────────────
 if [ "$OS_TYPE" = "windows-server" ]; then
   echo ">> Waiting for Windows to finish booting..."
@@ -175,8 +191,8 @@ if [ "$OS_TYPE" = "windows-server" ]; then
   CREDS_BLOCK="$(printf '*User:* `%s`\n*Password:* `%s`\n\n*Connect:*\n```\nssh %s@%s\n```' \
     "$SSH_USER" "$SSH_PASS" "$SSH_USER" "$IP")"
 else
-  CREDS_BLOCK="$(printf '*User:* `%s`\n\n*SSH private key* — copy everything between the lines into a file `key.pem`, then `chmod 600 key.pem`:\n```\n%s```\n*Connect:*\n```\nssh -i key.pem %s@%s\n```' \
-    "$SSH_USER" "$SSH_KEY_CONTENT" "$SSH_USER" "$IP")"
+  CREDS_BLOCK="$(printf '*User:* `%s`\n*Password:* `%s`  _(works for console/sudo and SSH)_\n\n*SSH private key* — copy everything between the lines into a file `key.pem`, then `chmod 600 key.pem`:\n```\n%s```\n*Connect with the key:*\n```\nssh -i key.pem %s@%s\n```\n*Or with the password:*\n```\nssh %s@%s\n```' \
+    "$SSH_USER" "$SSH_PASS" "$SSH_KEY_CONTENT" "$SSH_USER" "$IP" "$SSH_USER" "$IP")"
 fi
 
 MSG="$(printf ':white_check_mark: *Your VM is ready!*\n\n*Name:* `%s`\n*OS:* %s\n*IP:* `%s`\n\n%s' \

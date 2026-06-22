@@ -57,6 +57,10 @@ KEY_FILE="${KEY_DIR}/id_ed25519"
 trap "rm -rf ${KEY_DIR}" EXIT
 ssh-keygen -t ed25519 -f "$KEY_FILE" -C "proxmox-cloud@${HOSTNAME}" -N "" -q
 
+# Random password (alphanumeric, 20 chars) for root — usable for the Proxmox
+# console and, with password SSH enabled below, for SSH too (alongside the key).
+SSH_PASS="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20)"
+
 # ── Create the container ──────────────────────────────────────────────────────
 # nesting=1 keeps common workloads (docker, systemd quirks) happy; harmless otherwise.
 pct create "$VMID" "$TMPL_VOLID" \
@@ -132,11 +136,16 @@ pct exec "$VMID" -- bash -c '
   systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || true
 ' >/dev/null 2>&1 || true
 
+# ── Set root password + enable SSH password auth (and root login) ────────────
+# So the password works over SSH alongside the key. A 00- drop-in wins because
+# sshd uses the FIRST match. SSH_PASS is alphanumeric, safe to interpolate.
+pct exec "$VMID" -- bash -c "echo 'root:${SSH_PASS}' | chpasswd; mkdir -p /etc/ssh/sshd_config.d; printf 'PasswordAuthentication yes\nPermitRootLogin yes\n' > /etc/ssh/sshd_config.d/00-pve-password-auth.conf; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true" >/dev/null 2>&1 || true
+
 # ── Send Slack DM with credentials ───────────────────────────────────────────
 # Build with printf so escapes become REAL newlines (bash does not expand \n in
 # double quotes; jq --arg would otherwise send literal "\n" to Slack).
-CREDS_BLOCK="$(printf '*User:* `%s`\n\n*SSH private key* — copy everything between the lines into a file `key.pem`, then `chmod 600 key.pem`:\n```\n%s```\n*Connect:*\n```\nssh -i key.pem %s@%s\n```' \
-  "$SSH_USER" "$SSH_KEY_CONTENT" "$SSH_USER" "$IP")"
+CREDS_BLOCK="$(printf '*User:* `%s`\n*Password:* `%s`  _(works for console and SSH)_\n\n*SSH private key* — copy everything between the lines into a file `key.pem`, then `chmod 600 key.pem`:\n```\n%s```\n*Connect with the key:*\n```\nssh -i key.pem %s@%s\n```\n*Or with the password:*\n```\nssh %s@%s\n```' \
+  "$SSH_USER" "$SSH_PASS" "$SSH_KEY_CONTENT" "$SSH_USER" "$IP" "$SSH_USER" "$IP")"
 
 MSG="$(printf ':white_check_mark: *Your container is ready!*\n\n*Name:* `%s`\n*Template:* %s\n*IP:* `%s`\n\n%s' \
   "$HOSTNAME" "$TEMPLATE" "$IP" "$CREDS_BLOCK")"

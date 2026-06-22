@@ -11,15 +11,19 @@ SSH, and DMs credentials back to the user.
 
 | Form option | OS | Default SSH user | Auth method |
 |---|---|---|---|
-| Ubuntu Server | Ubuntu Server (cloud image) | `ubuntu` | SSH key (ed25519) |
-| Amazon Linux 2023 | Amazon Linux 2023 | `ec2-user` | SSH key (ed25519) |
+| Ubuntu Server | Ubuntu Server (cloud image) | `ubuntu` | SSH key (ed25519) **+ password** |
+| Amazon Linux 2023 | Amazon Linux 2023 | `ec2-user` | SSH key (ed25519) **+ password** |
 | Windows Server | Windows Server | `Administrator` | Password |
 
 **Containers** (`pct` from a `pveam` template):
 
 | Form option | Template | Default SSH user | Auth method |
 |---|---|---|---|
-| Ubuntu 22.04 | `ubuntu-22.04-standard` LXC | `root` | SSH key (ed25519) |
+| Ubuntu 22.04 | `ubuntu-22.04-standard` LXC | `root` | SSH key (ed25519) **+ password** |
+
+Linux VMs and containers get **both** an ephemeral SSH key *and* a random
+password (DM'd together). The password works for the Proxmox console, `sudo`, and
+SSH (password auth is enabled). The key is shown once and never stored.
 
 ## Slack commands
 

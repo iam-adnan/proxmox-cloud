@@ -71,6 +71,7 @@ jobs:
             --install qemu-guest-agent \
             --run-command 'systemctl enable qemu-guest-agent || true' \
             --run-command "printf '${NETCFG}' > /etc/systemd/network/05-pve-dhcp.network" \
+            --run-command "mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication yes\n' > /etc/ssh/sshd_config.d/00-pve-password-auth.conf" \
             --run-command 'cloud-init clean --logs || true'
 
           # 4. Recreate the target template
