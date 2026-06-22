@@ -82,6 +82,25 @@ pct set "$VMID" \
 pct start "$VMID"
 echo ">> Container started — waiting for an IP..."
 
+# ── DHCP broadcast fix (same root cause as the AL2023 VM template) ───────────
+# The PVE host is nested in VMware ESXi and this network's DHCP server replies
+# UNICAST. ESXi drops unicast frames addressed to the container's veth MAC (the
+# vSwitch isn't promiscuous), so systemd-networkd — which the Ubuntu LXC template
+# uses, configured by PVE in eth0.network — never latches a lease. Requesting a
+# BROADCAST offer fixes it. Apply a drop-in once the container's init is up, then
+# restart networkd. Best-effort + guarded so non-networkd templates don't break.
+for _ in $(seq 1 15); do
+  pct exec "$VMID" -- true 2>/dev/null && break
+  sleep 2
+done
+pct exec "$VMID" -- bash -c '
+  if [ -f /etc/systemd/network/eth0.network ] || systemctl is-active --quiet systemd-networkd; then
+    mkdir -p /etc/systemd/network/eth0.network.d
+    printf "[DHCPv4]\nRequestBroadcast=yes\n" > /etc/systemd/network/eth0.network.d/10-request-broadcast.conf
+    systemctl restart systemd-networkd
+  fi
+' 2>/dev/null || true
+
 # ── Wait for IP (containers boot fast; pct exec works once init is up) ────────
 MAX_WAIT=120
 ELAPSED=0

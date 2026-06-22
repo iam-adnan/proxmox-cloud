@@ -95,6 +95,16 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
   (idempotent — skipped if already present). SSH is key-based **root** login (works
   under Ubuntu's default `PermitRootLogin prohibit-password`); the script also
   best-effort installs/enables `sshd` in case the template lacks it.
+- **Container DHCP needs RequestBroadcast** — same root cause as the AL2023 VM fix.
+  This network's DHCP server replies **unicast** and the nested-ESXi vSwitch (not
+  promiscuous) drops unicast frames to the container's veth MAC, so the PVE-written
+  `eth0.network` (systemd-networkd, plain `DHCP=ipv4`) never gets a lease. After
+  `pct start`, `create-container.sh` writes a drop-in
+  `/etc/systemd/network/eth0.network.d/10-request-broadcast.conf` with `[DHCPv4]
+  RequestBroadcast=yes` and restarts networkd (verified: lease in ~5s vs never).
+  Without it the container provisions, gets no IP, and rolls back. VMs are fine —
+  the AL2023/Ubuntu **templates** bake the broadcast fix in; **containers can't**
+  (template is a stock tarball), so it's applied live at create time.
 - **The `note` (description) field is shell-interpolated** into the workflow via
   `${{ inputs.note }}`, so `lambda/index.js` `sanitizeNote()` strips it to
   `[A-Za-z0-9 _.,:/()-]` (max 100 chars) before dispatch. Don't loosen this without

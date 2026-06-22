@@ -1,9 +1,11 @@
 name: Build Ubuntu Cloud Template
 
 # Build an Ubuntu Server cloud-init template from the official Ubuntu cloud
-# image. Unlike Amazon Linux 2023 (see build-template.yml), the Ubuntu cloud
-# image gets DHCP right out of the box and libguestfs recognises it, so we can
-# --install qemu-guest-agent directly. After it finishes, point the
+# image. libguestfs recognises Ubuntu so we can --install qemu-guest-agent
+# directly. Like AL2023 (see build-template.yml) it ALSO needs the systemd-networkd
+# RequestBroadcast DHCP fix baked in — this network's DHCP server replies unicast
+# and the nested-ESXi vSwitch drops unicast frames to the guest MAC, so without it
+# the VM boots but never gets an IP. After it finishes, point the
 # PROXMOX_UBUNTU_TEMPLATE_ID secret at the new VMID.
 on:
   workflow_dispatch:
@@ -59,11 +61,16 @@ jobs:
             for f in $DISABLED; do mv "$f.disabled" "$f" 2>/dev/null || true; done
           fi
 
-          # 3. Bake the guest agent into the image offline so IP discovery works.
+          # 3. Bake the guest agent + DHCP broadcast fix into the image offline.
+          #    05-pve-dhcp.network sorts before cloud-init's netplan-rendered
+          #    10-netplan-*.network, and [Match] Type=ether matches eth0/ens18, so
+          #    systemd-networkd uses it and requests a BROADCAST DHCP offer.
           export LIBGUESTFS_BACKEND=direct
+          NETCFG='[Match]\nType=ether\n\n[Network]\nDHCP=ipv4\n\n[DHCPv4]\nRequestBroadcast=yes\n'
           virt-customize -a "${WORK}/${IMG}" \
             --install qemu-guest-agent \
             --run-command 'systemctl enable qemu-guest-agent || true' \
+            --run-command "printf '${NETCFG}' > /etc/systemd/network/05-pve-dhcp.network" \
             --run-command 'cloud-init clean --logs || true'
 
           # 4. Recreate the target template
