@@ -50,17 +50,22 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
 
 - **`lambda/index.js`** — the Slack entrypoint. Zero npm deps (Node 20 built-ins
   `crypto` + `https` only). Verifies the Slack signing secret, then:
-  - `/create-vm` (no args) **opens a Slack modal** via `views.open`. The modal has
-    a **Resource type** select (`vm`/`ct`) plus name, OS/template dropdown, CPU
-    cores, memory GB, disk GB, start-on-boot checkbox, a description note, and (for
-    containers) an unprivileged checkbox. The type select has `dispatch_action:
-    true`; changing it sends a `block_actions` payload and the handler re-renders
-    the modal with `views.update` (`createModal(type, prefill)` — `readPrefill`
-    keeps already-typed values across the switch). The **submission** arrives as a
-    `view_submission` to the *same* endpoint; `handleViewSubmission` validates and
-    dispatches **`create-vm.yml`** (type `vm`) or **`create-container.yml`** (type
-    `ct`). Needs `SLACK_BOT_TOKEN` in the Lambda env **and** Slack **Interactivity**
-    enabled (Request URL = the API Gateway endpoint).
+  - `/create-vm` (no args) **opens a Slack modal** via `views.open`. The modal is
+    **fully static**: one grouped "What to create" dropdown (`option_groups` =
+    Virtual machines + Containers) whose value encodes both kind and OS as
+    `vm:<os>` / `ct:<template>`, plus name, CPU cores, memory GB, disk GB, an
+    unprivileged checkbox (containers only; ignored for VMs), start-on-boot, and a
+    description note. The **submission** arrives as a `view_submission` to the
+    *same* endpoint; `handleViewSubmission` splits the `vm:`/`ct:` value and
+    dispatches **`create-vm.yml`** or **`create-container.yml`**. Needs
+    `SLACK_BOT_TOKEN` in the Lambda env **and** Slack **Interactivity** enabled
+    (Request URL = the API Gateway endpoint).
+    - **Why static, not a type toggle:** an earlier version used a `dispatch_action`
+      type select + `views.update` to swap the OS list. Slack returns `ok` but does
+      **not** reliably re-render an *input* block's options that way (verified via
+      CloudWatch: block_actions handled, view updated, yet the submitted modal kept
+      the stale VM options), so container creation always failed validation. Input
+      blocks are for submit-time data, not live view updates — keep the modal static.
   - `/delete-vm <name>`, `/list-vms` — plain text slash commands (both cover VMs
     and containers).
 - **`.github/workflows/create-vm.yml|create-container.yml|delete-vm.yml|list-vms.yml`**
@@ -265,8 +270,8 @@ all three when rebuilding or adding an OS:
   catalog pattern in `scripts/create-container.sh`. No template-ID secret — the
   image is downloaded on demand.
 - **Changing the create form** (fields, validation) is done in `createModal()` +
-  `handleViewSubmission` (+ `readPrefill` if the value should survive a type
-  switch) in `lambda/index.js`; new fields must be threaded through both
+  `handleViewSubmission` in `lambda/index.js` (static modal — no re-render); new
+  fields must be threaded through both
   `create-vm.yml`/`create-container.yml` inputs → the matching script's args (e.g.
   `cores`, `onboot`, `note`). Free-text fields must be sanitized (see
   `sanitizeNote`) — workflow inputs are shell-interpolated.

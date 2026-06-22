@@ -1,14 +1,17 @@
 /**
  * AWS Lambda handler — Slack entrypoint (behind an API Gateway HTTP API).
  *
- * /create-vm  -> opens a modal (resource type, name, OS, cores, memory, disk,
- *                start-on-boot, note; containers also expose an "unprivileged"
- *                toggle). Switching the "Resource type" select re-renders the
- *                modal (block_actions -> views.update) so VM vs container fields
- *                differ.
- * modal submit (view_submission) -> validates and triggers create-vm.yml
- *                (resource type "vm") or create-container.yml ("ct").
+ * /create-vm  -> opens a modal with ONE grouped "What to create" dropdown
+ *                (VMs + containers), plus name, cores, memory, disk, unprivileged
+ *                (containers only), start-on-boot, and a description note.
+ * modal submit (view_submission) -> validates and triggers create-vm.yml (a "vm:"
+ *                choice) or create-container.yml (a "ct:" choice).
  * /delete-vm <name>, /list-vms -> text slash commands (cover VMs and containers).
+ *
+ * The resource dropdown value encodes BOTH kind and OS as `vm:<os>` / `ct:<tmpl>`
+ * so the modal is fully static — no dynamic re-render. (An earlier version used a
+ * type toggle with dispatch_action + views.update, but Slack does not reliably
+ * re-render an input block's options that way, so the OS list went stale.)
  *
  * Uses only Node.js built-ins (crypto, https) — no npm install needed.
  */
@@ -24,10 +27,6 @@ const {
   GITHUB_REPO,
 } = process.env;
 
-// ── Resource types ───────────────────────────────────────────────────────────
-const RESOURCE_TYPES = ['vm', 'ct'];
-const RESOURCE_LABELS = { vm: 'Virtual machine', ct: 'Container (LXC)' };
-
 // ── VM operating systems (qm) ────────────────────────────────────────────────
 const VALID_VM_OS = ['ubuntu', 'amazon-linux', 'windows-server'];
 const VM_OS_LABELS = {
@@ -41,6 +40,12 @@ const VALID_CT_TEMPLATES = ['ubuntu-22.04'];
 const CT_TEMPLATE_LABELS = {
   'ubuntu-22.04': 'Ubuntu 22.04',
 };
+
+// Combined dropdown values: `vm:<os>` and `ct:<template>`.
+const RESOURCE_VALUES = [
+  ...VALID_VM_OS.map((o) => `vm:${o}`),
+  ...VALID_CT_TEMPLATES.map((t) => `ct:${t}`),
+];
 
 const VM_NAME_RE = /^[a-z0-9][a-z0-9-]{1,18}[a-z0-9]$/;
 const NOTE_MAX = 100;
@@ -153,159 +158,29 @@ const ok = (obj) => ({
   body: obj ? JSON.stringify(obj) : '',
 });
 
-const clampInt = (val, min, max, dflt) => {
-  const n = parseInt(val, 10);
-  if (!Number.isFinite(n)) return dflt;
-  return String(Math.min(max, Math.max(min, n)));
-};
-
-// ── Modal ────────────────────────────────────────────────────────────────────
-// `prefill` carries values across a type switch so the user doesn't retype them.
-function createModal(resourceType = 'vm', prefill = {}) {
-  const isCt = resourceType === 'ct';
-  const diskMin = isCt ? CT_DISK_MIN_GB : VM_DISK_MIN_GB;
-
-  const osValues = isCt ? VALID_CT_TEMPLATES : VALID_VM_OS;
-  const osLabels = isCt ? CT_TEMPLATE_LABELS : VM_OS_LABELS;
-  const osOptions = osValues.map((v) => ({
-    text: { type: 'plain_text', text: osLabels[v] },
-    value: v,
-  }));
-
-  const typeOption = (v) => ({ text: { type: 'plain_text', text: RESOURCE_LABELS[v] }, value: v });
-
-  const blocks = [
-    {
-      type: 'input',
-      block_id: 'resource_type',
-      dispatch_action: true, // re-render the modal when the type changes
-      label: { type: 'plain_text', text: 'Resource type' },
-      element: {
-        type: 'static_select',
-        action_id: 'val',
-        initial_option: typeOption(resourceType),
-        options: RESOURCE_TYPES.map(typeOption),
+// ── Modal (fully static — one grouped resource dropdown) ─────────────────────
+function createModal() {
+  const resourceElement = {
+    type: 'static_select',
+    action_id: 'val',
+    placeholder: { type: 'plain_text', text: 'Select what to create' },
+    option_groups: [
+      {
+        label: { type: 'plain_text', text: 'Virtual machines' },
+        options: VALID_VM_OS.map((o) => ({
+          text: { type: 'plain_text', text: VM_OS_LABELS[o] },
+          value: `vm:${o}`,
+        })),
       },
-    },
-    {
-      type: 'input',
-      block_id: 'vm_name',
-      label: { type: 'plain_text', text: isCt ? 'Container name' : 'VM name' },
-      element: {
-        type: 'plain_text_input',
-        action_id: 'val',
-        min_length: 3,
-        max_length: 20,
-        ...(prefill.vm_name ? { initial_value: prefill.vm_name } : {}),
-        placeholder: { type: 'plain_text', text: 'lowercase letters, digits, hyphens' },
+      {
+        label: { type: 'plain_text', text: 'Containers (LXC)' },
+        options: VALID_CT_TEMPLATES.map((t) => ({
+          text: { type: 'plain_text', text: CT_TEMPLATE_LABELS[t] },
+          value: `ct:${t}`,
+        })),
       },
-    },
-    {
-      type: 'input',
-      block_id: 'os_type',
-      label: { type: 'plain_text', text: isCt ? 'Template' : 'Operating system' },
-      element: {
-        type: 'static_select',
-        action_id: 'val',
-        initial_option: osOptions[0],
-        options: osOptions,
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'cores',
-      label: { type: 'plain_text', text: 'CPU cores' },
-      element: {
-        type: 'number_input',
-        action_id: 'val',
-        is_decimal_allowed: false,
-        min_value: String(CORES_MIN),
-        max_value: String(CORES_MAX),
-        initial_value: prefill.cores || '2',
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'memory_gb',
-      label: { type: 'plain_text', text: 'Memory (GB)' },
-      element: {
-        type: 'number_input',
-        action_id: 'val',
-        is_decimal_allowed: false,
-        min_value: String(MEM_MIN_GB),
-        max_value: String(MEM_MAX_GB),
-        initial_value: prefill.memory_gb || '2',
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'disk_gb',
-      label: { type: 'plain_text', text: isCt ? 'Disk / rootfs size (GB)' : 'Disk size (GB)' },
-      element: {
-        type: 'number_input',
-        action_id: 'val',
-        is_decimal_allowed: false,
-        min_value: String(diskMin),
-        max_value: String(DISK_MAX_GB),
-        initial_value: clampInt(prefill.disk_gb, diskMin, DISK_MAX_GB, String(diskMin)),
-      },
-      hint: {
-        type: 'plain_text',
-        text: isCt
-          ? `Minimum ${CT_DISK_MIN_GB} GB. Container rootfs is created at this size.`
-          : `Minimum ${VM_DISK_MIN_GB} GB (template size). Larger grows the disk.`,
-      },
-    },
-  ];
-
-  // Container-only: unprivileged toggle (checked by default = safer).
-  if (isCt) {
-    blocks.push({
-      type: 'input',
-      block_id: 'unprivileged',
-      optional: true,
-      label: { type: 'plain_text', text: 'Security' },
-      element: {
-        type: 'checkboxes',
-        action_id: 'val',
-        initial_options: [
-          { text: { type: 'plain_text', text: 'Unprivileged container (recommended)' }, value: 'unprivileged' },
-        ],
-        options: [
-          { text: { type: 'plain_text', text: 'Unprivileged container (recommended)' }, value: 'unprivileged' },
-        ],
-      },
-    });
-  }
-
-  blocks.push(
-    {
-      type: 'input',
-      block_id: 'onboot',
-      optional: true,
-      label: { type: 'plain_text', text: 'Startup' },
-      element: {
-        type: 'checkboxes',
-        action_id: 'val',
-        options: [
-          { text: { type: 'plain_text', text: 'Start automatically when the host boots' }, value: 'onboot' },
-        ],
-      },
-    },
-    {
-      type: 'input',
-      block_id: 'note',
-      optional: true,
-      label: { type: 'plain_text', text: 'Description / purpose' },
-      element: {
-        type: 'plain_text_input',
-        action_id: 'val',
-        max_length: NOTE_MAX,
-        ...(prefill.note ? { initial_value: prefill.note } : {}),
-        placeholder: { type: 'plain_text', text: 'optional note (e.g. "demo box for project X")' },
-      },
-    }
-  );
+    ],
+  };
 
   return {
     type: 'modal',
@@ -313,61 +188,122 @@ function createModal(resourceType = 'vm', prefill = {}) {
     title: { type: 'plain_text', text: 'Create a resource' },
     submit: { type: 'plain_text', text: 'Create' },
     close: { type: 'plain_text', text: 'Cancel' },
-    blocks,
+    blocks: [
+      {
+        type: 'input',
+        block_id: 'resource',
+        label: { type: 'plain_text', text: 'What to create' },
+        element: resourceElement,
+      },
+      {
+        type: 'input',
+        block_id: 'vm_name',
+        label: { type: 'plain_text', text: 'Name' },
+        element: {
+          type: 'plain_text_input',
+          action_id: 'val',
+          min_length: 3,
+          max_length: 20,
+          placeholder: { type: 'plain_text', text: 'lowercase letters, digits, hyphens' },
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'cores',
+        label: { type: 'plain_text', text: 'CPU cores' },
+        element: {
+          type: 'number_input', action_id: 'val', is_decimal_allowed: false,
+          min_value: String(CORES_MIN), max_value: String(CORES_MAX), initial_value: '2',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'memory_gb',
+        label: { type: 'plain_text', text: 'Memory (GB)' },
+        element: {
+          type: 'number_input', action_id: 'val', is_decimal_allowed: false,
+          min_value: String(MEM_MIN_GB), max_value: String(MEM_MAX_GB), initial_value: '2',
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'disk_gb',
+        label: { type: 'plain_text', text: 'Disk size (GB)' },
+        element: {
+          type: 'number_input', action_id: 'val', is_decimal_allowed: false,
+          min_value: String(CT_DISK_MIN_GB), max_value: String(DISK_MAX_GB), initial_value: '25',
+        },
+        hint: { type: 'plain_text', text: `VMs: min ${VM_DISK_MIN_GB} GB (template size). Containers: min ${CT_DISK_MIN_GB} GB.` },
+      },
+      {
+        type: 'input',
+        block_id: 'unprivileged',
+        optional: true,
+        label: { type: 'plain_text', text: 'Container security' },
+        element: {
+          type: 'checkboxes', action_id: 'val',
+          initial_options: [
+            { text: { type: 'plain_text', text: 'Unprivileged container (recommended; ignored for VMs)' }, value: 'unprivileged' },
+          ],
+          options: [
+            { text: { type: 'plain_text', text: 'Unprivileged container (recommended; ignored for VMs)' }, value: 'unprivileged' },
+          ],
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'onboot',
+        optional: true,
+        label: { type: 'plain_text', text: 'Startup' },
+        element: {
+          type: 'checkboxes', action_id: 'val',
+          options: [
+            { text: { type: 'plain_text', text: 'Start automatically when the host boots' }, value: 'onboot' },
+          ],
+        },
+      },
+      {
+        type: 'input',
+        block_id: 'note',
+        optional: true,
+        label: { type: 'plain_text', text: 'Description / purpose' },
+        element: {
+          type: 'plain_text_input', action_id: 'val', max_length: NOTE_MAX,
+          placeholder: { type: 'plain_text', text: 'optional note (e.g. "demo box for project X")' },
+        },
+      },
+    ],
   };
-}
-
-// Pull current values out of a submitted/edited view so a type switch can keep them.
-function readPrefill(view) {
-  const v = view?.state?.values || {};
-  return {
-    vm_name: v.vm_name?.val?.value || '',
-    cores: v.cores?.val?.value || '',
-    memory_gb: v.memory_gb?.val?.value || '',
-    disk_gb: v.disk_gb?.val?.value || '',
-    note: v.note?.val?.value || '',
-  };
-}
-
-// ── Handle a type-select change (block_actions) → re-render the modal ─────────
-async function handleBlockActions(payload) {
-  const action = (payload.actions || []).find((a) => a.block_id === 'resource_type' && a.action_id === 'val');
-  if (!action || !payload.view?.id) return ok();
-  const resourceType = action.selected_option?.value === 'ct' ? 'ct' : 'vm';
-  // Omit `hash` deliberately: a single user toggling their own modal won't race,
-  // and a stale hash would raise a "view hash conflict" that blocks the re-render.
-  await slackApi('views.update', {
-    view_id: payload.view.id,
-    view: createModal(resourceType, readPrefill(payload.view)),
-  });
-  return ok();
 }
 
 // ── Handle a completed modal (view_submission) ───────────────────────────────
 async function handleViewSubmission(payload) {
   const v = payload.view.state.values;
-  const resourceType = v.resource_type?.val?.selected_option?.value === 'ct' ? 'ct' : 'vm';
+  const resourceVal = v.resource?.val?.selected_option?.value || '';
+  const [resourceType, osType] = resourceVal.split(':');
   const isCt = resourceType === 'ct';
 
   const name = (v.vm_name?.val?.value || '').trim().toLowerCase();
-  const osType = v.os_type?.val?.selected_option?.value || '';
   const cores = parseInt(v.cores?.val?.value || '', 10);
   const memGb = parseInt(v.memory_gb?.val?.value || '', 10);
   const diskGb = parseInt(v.disk_gb?.val?.value || '', 10);
   const note = sanitizeNote(v.note?.val?.value || '');
   const onboot = (v.onboot?.val?.selected_options || []).length > 0;
-  const unprivileged = !isCt || (v.unprivileged?.val?.selected_options || []).length > 0;
+  const unprivileged = (v.unprivileged?.val?.selected_options || []).length > 0;
   const userId = payload.user?.id || '';
 
-  const validOs = isCt ? VALID_CT_TEMPLATES : VALID_VM_OS;
   const diskMin = isCt ? CT_DISK_MIN_GB : VM_DISK_MIN_GB;
 
   const errors = {};
+  if (!RESOURCE_VALUES.includes(resourceVal)) errors.resource = 'Pick what to create.';
   if (!VM_NAME_RE.test(name)) errors.vm_name = '3–20 chars, lowercase letters/digits/hyphens, no leading/trailing hyphen.';
-  if (!validOs.includes(osType)) errors.os_type = isCt ? 'Pick a valid template.' : 'Pick a valid OS.';
   if (!(cores >= CORES_MIN && cores <= CORES_MAX)) errors.cores = `Between ${CORES_MIN} and ${CORES_MAX}.`;
   if (!(memGb >= MEM_MIN_GB && memGb <= MEM_MAX_GB)) errors.memory_gb = `Between ${MEM_MIN_GB} and ${MEM_MAX_GB} GB.`;
-  if (!(diskGb >= diskMin && diskGb <= DISK_MAX_GB)) errors.disk_gb = `Between ${diskMin} and ${DISK_MAX_GB} GB.`;
+  if (!(diskGb >= diskMin && diskGb <= DISK_MAX_GB)) {
+    errors.disk_gb = isCt
+      ? `Containers: ${CT_DISK_MIN_GB}–${DISK_MAX_GB} GB.`
+      : `VMs need at least ${VM_DISK_MIN_GB} GB (template size); max ${DISK_MAX_GB}.`;
+  }
   if (Object.keys(errors).length) return ok({ response_action: 'errors', errors });
 
   if (isCt) {
@@ -428,12 +364,9 @@ exports.handler = async (event) => {
   const params = Object.fromEntries(new URLSearchParams(rawBody));
 
   try {
-    // ── Interactivity payloads (modal submit / type-select change) ───────────
+    // ── Interactivity payloads (modal submit) ────────────────────────────────
     if (params.payload) {
       const payload = JSON.parse(params.payload);
-      if (payload.type === 'block_actions') {
-        return await handleBlockActions(payload);
-      }
       if (payload.type === 'view_submission' && payload.view?.callback_id === 'create_vm_modal') {
         return await handleViewSubmission(payload);
       }
@@ -450,7 +383,7 @@ exports.handler = async (event) => {
         return ephemeral(':x: Server not configured for the form (missing SLACK_BOT_TOKEN). Ask an administrator.');
       }
       if (!params.trigger_id) return ephemeral(':x: Could not open the form (no trigger_id).');
-      await slackApi('views.open', { trigger_id: params.trigger_id, view: createModal('vm') });
+      await slackApi('views.open', { trigger_id: params.trigger_id, view: createModal() });
       return ok(); // empty 200 acks the slash command; the modal is already open
     }
 
