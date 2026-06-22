@@ -1,28 +1,42 @@
 # proxmox-cloud
 
-Self-service VM provisioning via Slack. Users request VMs through slash commands; a GitHub Actions CI/CD pipeline (running on a self-hosted runner on the Proxmox host) creates the VM, enables SSH, and DMs credentials back to the user.
+Self-service **VM and container** provisioning via Slack. Users request resources
+through a slash command; a GitHub Actions CI/CD pipeline (running on a self-hosted
+runner on the Proxmox host) creates the VM (`qm`) or LXC container (`pct`), enables
+SSH, and DMs credentials back to the user.
 
-## Supported OS types
+## Supported resources
 
-| Slack argument | OS | Default SSH user | Auth method |
+**Virtual machines** (`qm` clone of a cloud-init template):
+
+| Form option | OS | Default SSH user | Auth method |
 |---|---|---|---|
-| `ubuntu` | Ubuntu Server | `ubuntu` | SSH key (ed25519) |
-| `amazon-linux` | Amazon Linux 2023 | `ec2-user` | SSH key (ed25519) |
-| `windows-server` | Windows Server | `Administrator` | Password |
+| Ubuntu Server | Ubuntu Server (cloud image) | `ubuntu` | SSH key (ed25519) |
+| Amazon Linux 2023 | Amazon Linux 2023 | `ec2-user` | SSH key (ed25519) |
+| Windows Server | Windows Server | `Administrator` | Password |
+
+**Containers** (`pct` from a `pveam` template):
+
+| Form option | Template | Default SSH user | Auth method |
+|---|---|---|---|
+| Ubuntu 22.04 | `ubuntu-22.04-standard` LXC | `root` | SSH key (ed25519) |
 
 ## Slack commands
 
 ```
-/create-vm ubuntu          my-dev-box
-/create-vm amazon-linux    prod-app
-/create-vm windows-server  rdp-box
+/create-vm          # opens a form: Resource type (VM / Container), name, OS/template,
+                    # CPU cores, memory, disk, start-on-boot, description, and
+                    # (containers) an unprivileged toggle
 
-/delete-vm my-dev-box
+/delete-vm my-dev-box   # works for both VMs and containers
 
-/list-vms
+/list-vms               # lists your VMs and containers
 ```
 
-After `/create-vm`, you receive an ephemeral acknowledgement. When the VM is ready (2–5 min), the bot DMs you the IP and credentials. Only the user who created a VM can delete it.
+`/create-vm` opens a modal. Choosing **Resource type** re-renders the form so VM and
+container fields differ. On submit you get an ephemeral acknowledgement; when the
+resource is ready (containers ~1–2 min, VMs 2–5 min) the bot DMs you the IP and
+credentials. Only the user who created a resource can delete it.
 
 ---
 
@@ -96,11 +110,18 @@ Go to **repo → Settings → Secrets and variables → Actions** and add:
 | Secret | Description |
 |---|---|
 | `PROXMOX_NODE` | Proxmox node name (e.g. `pve`) |
-| `PROXMOX_STORAGE` | Storage pool for disks (e.g. `local-lvm`) |
-| `PROXMOX_UBUNTU_TEMPLATE_ID` | VMID of the Ubuntu Server template |
+| `PROXMOX_STORAGE` | Storage pool for VM disks / container rootfs (e.g. `local-lvm`) |
+| `PROXMOX_UBUNTU_TEMPLATE_ID` | VMID of the Ubuntu Server template (build via `build-ubuntu-template.yml`) |
 | `PROXMOX_AMAZON_LINUX_TEMPLATE_ID` | VMID of the Amazon Linux template |
 | `PROXMOX_WINDOWS_TEMPLATE_ID` | VMID of the Windows Server template |
+| `PROXMOX_CT_TEMPLATE_STORAGE` | *(optional)* storage holding `vztmpl` LXC images (default `local`) |
+| `PROXMOX_BRIDGE` | *(optional)* network bridge for new resources (default `vmbr0`) |
 | `SLACK_BOT_TOKEN` | Slack bot OAuth token (`xoxb-...`) — used by workflows to send DMs |
+
+> **Building templates:** run the `Build Ubuntu Cloud Template` workflow (manual
+> dispatch) to create the Ubuntu VM template, then set `PROXMOX_UBUNTU_TEMPLATE_ID`
+> to the VMID it prints. Container templates are downloaded automatically via
+> `pveam` on first use — no template build needed.
 
 ---
 

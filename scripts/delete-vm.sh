@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs on the Proxmox host via self-hosted GitHub Actions runner.
-# Usage: delete-vm.sh <vm_name> <slack_user_id>
-# Only the user who created the VM can delete it.
+# Deletes a VM (qm) or container (pct) by name. Only the creator can delete it.
+# Usage: delete-vm.sh <name> <slack_user_id>
 set -euo pipefail
 
 VM_NAME="$1"
@@ -14,44 +14,72 @@ notify() {
     -d "$(jq -n --arg ch "$SLACK_USER_ID" --arg txt "$1" '{channel: $ch, text: $txt}')" || true
 }
 
-# ── Find VMID(s) by name ──────────────────────────────────────────────────────
-# A name is not guaranteed unique (create-vm doesn't enforce it), so collect all
-# matches and operate on each one this user owns.
-mapfile -t VMIDS < <(qm list | awk -v name="$VM_NAME" 'NR>1 && $2==name {print $1}')
+# ── Collect candidates across VMs and containers ─────────────────────────────
+# Names aren't guaranteed unique (and a VM and a container could share a name),
+# so match on the config-reported name/hostname and record the kind with the id.
+declare -a CAND=()  # entries like "vm:123" / "ct:456"
 
-if [ "${#VMIDS[@]}" -eq 0 ]; then
-  notify ":warning: VM \`${VM_NAME}\` not found."
+while IFS= read -r ID; do
+  [ -z "$ID" ] && continue
+  NM="$(qm config "$ID" 2>/dev/null | sed -n 's/^name: //p')"
+  [ "$NM" = "$VM_NAME" ] && CAND+=("vm:$ID")
+done < <(qm list 2>/dev/null | awk 'NR>1 {print $1}')
+
+while IFS= read -r ID; do
+  [ -z "$ID" ] && continue
+  NM="$(pct config "$ID" 2>/dev/null | sed -n 's/^hostname: //p')"
+  [ "$NM" = "$VM_NAME" ] && CAND+=("ct:$ID")
+done < <(pct list 2>/dev/null | awk 'NR>1 {print $1}')
+
+if [ "${#CAND[@]}" -eq 0 ]; then
+  notify ":warning: \`${VM_NAME}\` not found."
   exit 0
 fi
 
 DELETED=0
-for VMID in "${VMIDS[@]}"; do
+for ENTRY in "${CAND[@]}"; do
+  KIND="${ENTRY%%:*}"
+  VMID="${ENTRY##*:}"
+
   # ── Verify ownership ───────────────────────────────────────────────────────
-  # Proxmox percent-encodes the description in `qm config` output, so URL-decode
-  # before parsing the JSON.
-  DESC="$(qm config "$VMID" | grep '^description:' | sed 's/^description: //' || true)"
+  # Proxmox percent-encodes the description in config output; URL-decode first.
+  if [ "$KIND" = "vm" ]; then
+    DESC="$(qm config "$VMID" | grep '^description:' | sed 's/^description: //' || true)"
+  else
+    DESC="$(pct config "$VMID" | grep '^description:' | sed 's/^description: //' || true)"
+  fi
   OWNER="$(printf '%s' "$DESC" | python3 -c "import json,sys,urllib.parse; d=json.loads(urllib.parse.unquote(sys.stdin.read())); print(d.get('slack_user_id',''))" 2>/dev/null || true)"
 
   if [ "$OWNER" != "$SLACK_USER_ID" ]; then
-    echo ">> Skipping VMID=$VMID (owned by '$OWNER', not '$SLACK_USER_ID')"
+    echo ">> Skipping $KIND $VMID (owned by '$OWNER', not '$SLACK_USER_ID')"
     continue
   fi
 
-  echo ">> Deleting VM '$VM_NAME' (VMID=$VMID)..."
+  echo ">> Deleting $KIND '$VM_NAME' (id=$VMID)..."
 
-  # ── Stop VM if running ─────────────────────────────────────────────────────
-  STATUS="$(qm status "$VMID" | awk '{print $2}')"
-  if [ "$STATUS" = "running" ]; then
-    qm stop "$VMID"
-    for _ in $(seq 1 30); do
-      sleep 2
-      [ "$(qm status "$VMID" | awk '{print $2}')" = "stopped" ] && break
-    done
+  if [ "$KIND" = "vm" ]; then
+    STATUS="$(qm status "$VMID" | awk '{print $2}')"
+    if [ "$STATUS" = "running" ]; then
+      qm stop "$VMID"
+      for _ in $(seq 1 30); do
+        sleep 2
+        [ "$(qm status "$VMID" | awk '{print $2}')" = "stopped" ] && break
+      done
+    fi
+    qm destroy "$VMID" --purge
+  else
+    STATUS="$(pct status "$VMID" | awk '{print $2}')"
+    if [ "$STATUS" = "running" ]; then
+      pct stop "$VMID"
+      for _ in $(seq 1 30); do
+        sleep 2
+        [ "$(pct status "$VMID" | awk '{print $2}')" = "stopped" ] && break
+      done
+    fi
+    pct destroy "$VMID" --purge
   fi
 
-  # ── Destroy VM ─────────────────────────────────────────────────────────────
-  qm destroy "$VMID" --purge
-  echo ">> VM $VM_NAME (VMID=$VMID) deleted."
+  echo ">> $KIND $VM_NAME (id=$VMID) deleted."
   DELETED=$((DELETED + 1))
 done
 
@@ -60,5 +88,4 @@ if [ "$DELETED" -eq 0 ]; then
   exit 0
 fi
 
-# ── Notify Slack ──────────────────────────────────────────────────────────────
-notify ":wastebasket: VM \`${VM_NAME}\` has been deleted."
+notify ":wastebasket: \`${VM_NAME}\` has been deleted."

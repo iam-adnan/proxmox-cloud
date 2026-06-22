@@ -1,0 +1,93 @@
+name: Build Ubuntu Cloud Template
+
+# Build an Ubuntu Server cloud-init template from the official Ubuntu cloud
+# image. Unlike Amazon Linux 2023 (see build-template.yml), the Ubuntu cloud
+# image gets DHCP right out of the box and libguestfs recognises it, so we can
+# --install qemu-guest-agent directly. After it finishes, point the
+# PROXMOX_UBUNTU_TEMPLATE_ID secret at the new VMID.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Ubuntu release (e.g. 22.04, 24.04)'
+        required: true
+        default: '22.04'
+        type: string
+      new_id:
+        description: 'VMID to create for the new template'
+        required: true
+        default: '9102'
+        type: string
+
+jobs:
+  build:
+    runs-on: self-hosted
+    timeout-minutes: 25
+    env:
+      RELEASE: ${{ inputs.release }}
+      NEW_ID: ${{ inputs.new_id }}
+      STORAGE: ${{ secrets.PROXMOX_STORAGE }}
+      BRIDGE: ${{ secrets.PROXMOX_BRIDGE }}
+    steps:
+      - name: Build Ubuntu cloud template
+        run: |
+          set -euo pipefail
+          STORAGE="${STORAGE:-local-lvm}"
+          BRIDGE="${BRIDGE:-vmbr0}"
+          IMG="ubuntu-${RELEASE}-server-cloudimg-amd64.img"
+          URL="https://cloud-images.ubuntu.com/releases/${RELEASE}/release/${IMG}"
+          WORK="/var/lib/vz/template/iso"
+          mkdir -p "$WORK"
+          echo ">> Release: $RELEASE  ->  new template: $NEW_ID  (storage=$STORAGE, bridge=$BRIDGE)"
+
+          # 1. Download the cloud image (fresh each run keeps it current)
+          echo ">> Downloading $URL"
+          curl -fL "$URL" -o "${WORK}/${IMG}"
+
+          # 2. Tooling — install libguestfs the same way build-template.yml does
+          #    (enterprise PVE repos 401 without a subscription and break apt).
+          if ! command -v virt-customize >/dev/null 2>&1; then
+            echo ">> Installing libguestfs-tools..."
+            export DEBIAN_FRONTEND=noninteractive
+            DISABLED=""
+            for f in $(grep -rlE "enterprise\.proxmox\.com" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null || true); do
+              mv "$f" "$f.disabled" && DISABLED="$DISABLED $f"
+            done
+            echo ">> Temporarily disabled apt sources:${DISABLED:- none}"
+            apt-get update -y
+            apt-get install -y libguestfs-tools
+            for f in $DISABLED; do mv "$f.disabled" "$f" 2>/dev/null || true; done
+          fi
+
+          # 3. Bake the guest agent into the image offline so IP discovery works.
+          export LIBGUESTFS_BACKEND=direct
+          virt-customize -a "${WORK}/${IMG}" \
+            --install qemu-guest-agent \
+            --run-command 'systemctl enable qemu-guest-agent || true' \
+            --run-command 'cloud-init clean --logs || true'
+
+          # 4. Recreate the target template
+          if qm status "$NEW_ID" >/dev/null 2>&1; then
+            echo ">> Removing existing VMID $NEW_ID"
+            qm stop "$NEW_ID" >/dev/null 2>&1 || true
+            qm destroy "$NEW_ID" --purge
+          fi
+
+          qm create "$NEW_ID" \
+            --name "ubuntu-${RELEASE}-cloud" \
+            --memory 2048 --cores 2 \
+            --net0 "virtio,bridge=${BRIDGE}" \
+            --scsihw virtio-scsi-pci \
+            --ostype l26 \
+            --agent enabled=1
+
+          qm importdisk "$NEW_ID" "${WORK}/${IMG}" "$STORAGE"
+          qm set "$NEW_ID" --scsi0 "${STORAGE}:vm-${NEW_ID}-disk-0"
+          qm set "$NEW_ID" --ide2 "${STORAGE}:cloudinit"
+          qm set "$NEW_ID" --boot c --bootdisk scsi0
+          qm set "$NEW_ID" --serial0 socket --vga serial0
+
+          # 5. Convert to template
+          qm template "$NEW_ID"
+          echo ">> DONE. Ubuntu template is VMID $NEW_ID."
+          echo ">> Update the PROXMOX_UBUNTU_TEMPLATE_ID secret to $NEW_ID."

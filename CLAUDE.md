@@ -4,10 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Self-service VM provisioning on a **local Proxmox VE** host, driven from Slack. A
-user runs a slash command; a serverless function triggers a GitHub Actions
-workflow; a self-hosted runner *on the Proxmox host* clones a VM template, enables
+Self-service **VM and LXC container** provisioning on a **local Proxmox VE** host,
+driven from Slack. A user runs a slash command; a serverless function triggers a
+GitHub Actions workflow; a self-hosted runner *on the Proxmox host* clones a VM
+template (`qm`) or creates a container from a `pveam` template (`pct`), enables
 SSH, and DMs the credentials back to the user.
+
+`/create-vm` opens **one modal** with a **Resource type** toggle (VM / Container).
+Containers use `pct`/`pveam` (no QEMU guest agent — `pct exec` reaches the guest
+directly), log in as `root`, and have an extra "unprivileged" option. VMs are
+unchanged (`qm clone` of a cloud-init template). `/delete-vm` and `/list-vms`
+operate on **both** kinds.
 
 There is **no Terraform/Terragrunt and no nginx reverse proxy** in the current
 design (an earlier iteration had both — ignore any stale references). VMs get a
@@ -43,17 +50,28 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
 
 - **`lambda/index.js`** — the Slack entrypoint. Zero npm deps (Node 20 built-ins
   `crypto` + `https` only). Verifies the Slack signing secret, then:
-  - `/create-vm` (no args) **opens a Slack modal** via `views.open` (name, OS
-    dropdown, memory GB, disk GB). The modal **submission** arrives as a
-    `view_submission` interaction payload to the *same* endpoint; the handler
-    validates it and calls `workflow_dispatch`. This needs `SLACK_BOT_TOKEN` in the
-    Lambda env **and** Slack **Interactivity** enabled (Request URL = the API
-    Gateway endpoint).
-  - `/delete-vm <name>`, `/list-vms` — plain text slash commands.
-- **`.github/workflows/create-vm.yml|delete-vm.yml|list-vms.yml`** — one workflow
-  per command, all `runs-on: self-hosted`, each `workflow_dispatch` with typed
-  inputs. They `chmod +x` and run the matching script, and post a Slack failure DM
-  on `if: failure()`.
+  - `/create-vm` (no args) **opens a Slack modal** via `views.open`. The modal has
+    a **Resource type** select (`vm`/`ct`) plus name, OS/template dropdown, CPU
+    cores, memory GB, disk GB, start-on-boot checkbox, a description note, and (for
+    containers) an unprivileged checkbox. The type select has `dispatch_action:
+    true`; changing it sends a `block_actions` payload and the handler re-renders
+    the modal with `views.update` (`createModal(type, prefill)` — `readPrefill`
+    keeps already-typed values across the switch). The **submission** arrives as a
+    `view_submission` to the *same* endpoint; `handleViewSubmission` validates and
+    dispatches **`create-vm.yml`** (type `vm`) or **`create-container.yml`** (type
+    `ct`). Needs `SLACK_BOT_TOKEN` in the Lambda env **and** Slack **Interactivity**
+    enabled (Request URL = the API Gateway endpoint).
+  - `/delete-vm <name>`, `/list-vms` — plain text slash commands (both cover VMs
+    and containers).
+- **`.github/workflows/create-vm.yml|create-container.yml|delete-vm.yml|list-vms.yml`**
+  — one workflow per action, all `runs-on: self-hosted`, each `workflow_dispatch`
+  with typed inputs. They `chmod +x` and run the matching script, and post a Slack
+  failure DM on `if: failure()`.
+- **`.github/workflows/build-ubuntu-template.yml`** — one-off tool to build the
+  **Ubuntu Server VM** template from the official Ubuntu cloud image. Simpler than
+  AL2023: the image DHCPs out of the box and libguestfs recognises Ubuntu, so it
+  `--install qemu-guest-agent` directly. Defaults `new_id` 9102; point
+  `PROXMOX_UBUNTU_TEMPLATE_ID` at it after.
 - **`.github/workflows/build-template.yml`** — one-off tool to (re)build an OS
   template: full-clones a pristine base (`src_id`, default `9001`) to a new VMID
   (`new_id`, default `9101`) and offline-customises it with libguestfs
@@ -64,22 +82,38 @@ HTTPS. All `qm`/`pvesh` work happens in `scripts/*.sh`.
 
 ## Non-obvious behavior — don't break these
 
-- **OS → template/user mapping** lives in `scripts/create-vm.sh`. Three types:
-  `ubuntu` (user `ubuntu`), `amazon-linux` (user `ec2-user`), `windows-server`
-  (user `Administrator`). The valid-OS list is duplicated in `lambda/index.js`
-  (`VALID_OS`) — keep both in sync.
+- **OS → template/user mapping** lives in `scripts/create-vm.sh` (VMs) and the
+  template → `pveam` pattern map in `scripts/create-container.sh` (containers). VM
+  types: `ubuntu` (user `ubuntu`), `amazon-linux` (user `ec2-user`),
+  `windows-server` (user `Administrator`). Container templates: `ubuntu-22.04`
+  (user `root`). The allowlists are duplicated in `lambda/index.js` (`VALID_VM_OS`
+  / `VALID_CT_TEMPLATES`) — keep them in sync with the scripts and the workflow
+  `choice` options.
+- **Containers don't use the guest agent.** `pct exec` reaches the guest directly;
+  IP discovery polls `pct exec <id> -- ip -4 -o addr show dev eth0` (~2 min window,
+  faster boot than VMs). Templates are downloaded on first use via `pveam download`
+  (idempotent — skipped if already present). SSH is key-based **root** login (works
+  under Ubuntu's default `PermitRootLogin prohibit-password`); the script also
+  best-effort installs/enables `sshd` in case the template lacks it.
+- **The `note` (description) field is shell-interpolated** into the workflow via
+  `${{ inputs.note }}`, so `lambda/index.js` `sanitizeNote()` strips it to
+  `[A-Za-z0-9 _.,:/()-]` (max 100 chars) before dispatch. Don't loosen this without
+  re-checking the injection path. All other create inputs are allowlisted/numeric.
 - **Linux vs Windows auth differ.** Linux: generate an ephemeral ed25519 keypair,
   inject the public key via cloud-init (`qm set --sshkeys`), DM the **private key**
   once (never stored). Windows: set the Administrator password via
   `qm guest exec ... powershell` and ensure OpenSSH Server is running; DM the
   password.
-- **Ownership metadata is stored in the VM description** as JSON
-  (`{"slack_user_id":...,"os_type":...,"created_at":...}`) plus a `proxmox-cloud`
-  tag. `delete-vm.sh` enforces that only the creator can delete; `list-vms.sh`
-  filters by this. If you change the JSON shape, update all three scripts.
-  **Proxmox percent-encodes the description** in `qm config` output (`:` → `%3A`),
-  so the scripts `urllib.parse.unquote` it before `json.loads` — without that the
-  owner parses empty and ownership checks silently fail.
+- **Ownership metadata is stored in the VM/CT description** as JSON
+  (`{"slack_user_id":...,"os_type":...,"created_at":...,"kind":"vm|ct","note":...}`)
+  plus a `proxmox-cloud` tag. `kind` lets `delete-vm.sh`/`list-vms.sh` know whether
+  to use `qm` or `pct`; `note` is the optional user description. `delete-vm.sh`
+  enforces that only the creator can delete; `list-vms.sh` filters by this. If you
+  change the JSON shape, update **all four** scripts (`create-vm.sh`,
+  `create-container.sh`, `list-vms.sh`, `delete-vm.sh`). **Proxmox percent-encodes
+  the description** in `qm`/`pct config` output (`:` → `%3A`), so the scripts
+  `urllib.parse.unquote` it before `json.loads` — without that the owner parses
+  empty and ownership checks silently fail.
 - **IP discovery** polls the QEMU guest agent
   (`qm guest cmd <id> network-get-interfaces`) for up to ~7 min (`MAX_WAIT=420`).
   The template MUST have the guest agent **running** (see template build) or
@@ -112,8 +146,11 @@ Two separate stores; do not mix them up.
   and the Slack reply is the generic "something went wrong".
 - **GitHub Actions repo secrets** (the Proxmox-facing half): `SLACK_BOT_TOKEN`
   (used by scripts to DM users), `PROXMOX_NODE`, `PROXMOX_STORAGE`, and one
-  template-ID secret per OS: `PROXMOX_UBUNTU_TEMPLATE_ID`,
-  `PROXMOX_AMAZON_LINUX_TEMPLATE_ID`, `PROXMOX_WINDOWS_TEMPLATE_ID`.
+  template-ID secret per VM OS: `PROXMOX_UBUNTU_TEMPLATE_ID`,
+  `PROXMOX_AMAZON_LINUX_TEMPLATE_ID`, `PROXMOX_WINDOWS_TEMPLATE_ID`. Optional:
+  `PROXMOX_CT_TEMPLATE_STORAGE` (where `vztmpl` LXC images live, default `local`)
+  and `PROXMOX_BRIDGE` (network bridge, default `vmbr0`). Containers need no
+  template-ID secret — the image is pulled via `pveam` on demand.
 
 Never print secrets to workflow logs. `.gitignore` already excludes `lambda/.env`,
 `*.pem`, `*.key`, and the build zip.
@@ -206,13 +243,23 @@ all three when rebuilding or adding an OS:
 
 ## When extending
 
-- **Adding an OS type** requires: `VALID_OS` + `OS_LABELS` (modal dropdown) in
-  `lambda/index.js`, the `case` block in `scripts/create-vm.sh` (template ID + SSH
-  user + auth method), a new `PROXMOX_*_TEMPLATE_ID` GitHub secret, and a built
-  template on the host (via `build-template.yml` with the three fixes above).
-- **Changing the create-vm form** (fields, validation) is done in the modal JSON
-  and `handleViewSubmission` in `lambda/index.js`; new fields must be threaded
-  through `create-vm.yml` inputs → `create-vm.sh` args (e.g. `memory`, `disk_gb`).
+- **Adding a VM OS type** requires: `VALID_VM_OS` + `VM_OS_LABELS` (modal dropdown)
+  in `lambda/index.js`, the `case` block in `scripts/create-vm.sh` (template ID +
+  SSH user + auth method), a `choice` option in `create-vm.yml`, a new
+  `PROXMOX_*_TEMPLATE_ID` GitHub secret, and a built template on the host (Ubuntu
+  via `build-ubuntu-template.yml`; AL2023 via `build-template.yml` with the three
+  fixes above).
+- **Adding a container template** requires: `VALID_CT_TEMPLATES` +
+  `CT_TEMPLATE_LABELS` in `lambda/index.js`, a `choice` option in
+  `create-container.yml`, and a `case` entry mapping the friendly id to a `pveam`
+  catalog pattern in `scripts/create-container.sh`. No template-ID secret — the
+  image is downloaded on demand.
+- **Changing the create form** (fields, validation) is done in `createModal()` +
+  `handleViewSubmission` (+ `readPrefill` if the value should survive a type
+  switch) in `lambda/index.js`; new fields must be threaded through both
+  `create-vm.yml`/`create-container.yml` inputs → the matching script's args (e.g.
+  `cores`, `onboot`, `note`). Free-text fields must be sanitized (see
+  `sanitizeNote`) — workflow inputs are shell-interpolated.
 - **Adding a command** requires a new workflow file, a new script, and a new
   handler branch in `lambda/index.js` (plus a Slack slash command pointed at the
   API Gateway endpoint).

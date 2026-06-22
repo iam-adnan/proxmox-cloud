@@ -1,23 +1,26 @@
-name: Create VM
+name: Create Container
 
 on:
   workflow_dispatch:
     inputs:
-      os_type:
-        description: 'OS type (ubuntu | amazon-linux | windows-server)'
+      template:
+        description: 'Container template (ubuntu-22.04)'
         required: true
         type: choice
         options:
-          - ubuntu
-          - amazon-linux
-          - windows-server
+          - ubuntu-22.04
       vm_name:
-        description: 'VM name (3–20 chars, lowercase alphanumeric + hyphens)'
+        description: 'Container name / hostname (3–20 chars, lowercase alphanumeric + hyphens)'
         required: true
         type: string
       slack_user_id:
         description: 'Slack user ID to DM results to'
         required: true
+        type: string
+      cores:
+        description: 'CPU cores'
+        required: false
+        default: '2'
         type: string
       memory:
         description: 'RAM in MB'
@@ -25,14 +28,14 @@ on:
         default: '2048'
         type: string
       disk_gb:
-        description: 'Disk size in GB (>= template size)'
+        description: 'Rootfs size in GB'
         required: false
-        default: '25'
+        default: '8'
         type: string
-      cores:
-        description: 'CPU cores'
+      unprivileged:
+        description: 'Unprivileged container (1) or privileged (0)'
         required: false
-        default: '2'
+        default: '1'
         type: string
       onboot:
         description: 'Start on host boot (1) or not (0)'
@@ -48,30 +51,30 @@ on:
 jobs:
   create:
     runs-on: self-hosted
-    timeout-minutes: 35
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create VM on Proxmox
-        id: vm
+      - name: Create container on Proxmox
+        id: ct
         env:
           PROXMOX_NODE: ${{ secrets.PROXMOX_NODE }}
           PROXMOX_STORAGE: ${{ secrets.PROXMOX_STORAGE }}
-          PROXMOX_UBUNTU_TEMPLATE_ID: ${{ secrets.PROXMOX_UBUNTU_TEMPLATE_ID }}
-          PROXMOX_AMAZON_LINUX_TEMPLATE_ID: ${{ secrets.PROXMOX_AMAZON_LINUX_TEMPLATE_ID }}
-          PROXMOX_WINDOWS_TEMPLATE_ID: ${{ secrets.PROXMOX_WINDOWS_TEMPLATE_ID }}
+          PROXMOX_CT_TEMPLATE_STORAGE: ${{ secrets.PROXMOX_CT_TEMPLATE_STORAGE }}
+          PROXMOX_BRIDGE: ${{ secrets.PROXMOX_BRIDGE }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
-          chmod +x scripts/create-vm.sh
-          bash scripts/create-vm.sh \
-            "${{ inputs.os_type }}" \
+          chmod +x scripts/create-container.sh
+          bash scripts/create-container.sh \
+            "${{ inputs.template }}" \
             "${{ inputs.vm_name }}" \
             "${{ inputs.slack_user_id }}" \
+            "${{ inputs.cores }}" \
             "${{ inputs.memory }}" \
             "${{ inputs.disk_gb }}" \
-            "${{ inputs.cores }}" \
+            "${{ inputs.unprivileged }}" \
             "${{ inputs.onboot }}" \
             "${{ inputs.note }}"
 
@@ -86,4 +89,4 @@ jobs:
             -d "$(jq -n \
               --arg ch "${{ inputs.slack_user_id }}" \
               --arg vm "${{ inputs.vm_name }}" \
-              '{channel: $ch, text: (":x: Failed to create VM `" + $vm + "`. Check the Actions run for details or contact an administrator.")}')"
+              '{channel: $ch, text: (":x: Failed to create container `" + $vm + "`. Check the Actions run for details or contact an administrator.")}')"

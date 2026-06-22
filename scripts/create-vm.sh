@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs on the Proxmox host via self-hosted GitHub Actions runner.
-# Usage: create-vm.sh <os_type> <vm_name> <slack_user_id> [memory_mb] [disk_gb]
+# Usage: create-vm.sh <os_type> <vm_name> <slack_user_id> [memory_mb] [disk_gb] [cores] [onboot] [note]
 set -euo pipefail
 
 OS_TYPE="$1"
@@ -8,6 +8,9 @@ VM_NAME="$2"
 SLACK_USER_ID="$3"
 MEMORY_MB="${4:-2048}"
 DISK_GB="${5:-25}"
+CORES="${6:-2}"
+ONBOOT="${7:-0}"
+NOTE="${8:-}"
 
 STORAGE="${PROXMOX_STORAGE:-local-lvm}"
 NODE="${PROXMOX_NODE:-pve}"
@@ -42,8 +45,8 @@ qm clone "$TEMPLATE_ID" "$VMID" \
   --full \
   --storage "$STORAGE"
 
-# ── Apply requested memory ───────────────────────────────────────────────────
-qm set "$VMID" --memory "$MEMORY_MB"
+# ── Apply requested memory / cores / boot policy ─────────────────────────────
+qm set "$VMID" --memory "$MEMORY_MB" --cores "$CORES" --onboot "$ONBOOT"
 
 # ── Grow the disk if a larger size was requested (qm can only grow, not shrink).
 # Template disk is 25G; cloud-init growpart expands the filesystem on first boot.
@@ -55,10 +58,12 @@ elif [ -n "$CUR_GB" ] && [ "$DISK_GB" -lt "$CUR_GB" ]; then
   echo ">> Requested ${DISK_GB}G < template ${CUR_GB}G; keeping ${CUR_GB}G (cannot shrink)."
 fi
 
-# Store owner metadata in VM description so we can enforce per-user ops later
+# Store owner metadata in VM description so we can enforce per-user ops later.
+# Shape is shared with create-container.sh / list-vms.sh / delete-vm.sh — keep
+# `kind` (vm|ct) and `note` in sync across all four if you change it.
 CREATED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 qm set "$VMID" \
-  --description "{\"slack_user_id\":\"$SLACK_USER_ID\",\"os_type\":\"$OS_TYPE\",\"created_at\":\"$CREATED_AT\"}" \
+  --description "{\"slack_user_id\":\"$SLACK_USER_ID\",\"os_type\":\"$OS_TYPE\",\"created_at\":\"$CREATED_AT\",\"kind\":\"vm\",\"note\":\"$NOTE\"}" \
   --tags "proxmox-cloud"
 
 # ── Linux: inject SSH key via cloud-init ─────────────────────────────────────
