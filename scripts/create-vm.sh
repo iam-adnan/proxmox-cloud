@@ -49,13 +49,21 @@ qm clone "$TEMPLATE_ID" "$VMID" \
 qm set "$VMID" --memory "$MEMORY_MB" --cores "$CORES" --onboot "$ONBOOT"
 
 # ── Grow the disk if a larger size was requested (qm can only grow, not shrink).
-# Template disk is 25G; cloud-init growpart expands the filesystem on first boot.
-CUR_GB="$(qm config "$VMID" | sed -n 's/^scsi0:.*size=\([0-9]\+\)G.*/\1/p')"
+# The template disk size may be expressed in M, G or T (e.g. the Ubuntu cloud
+# image imports as ~2252M, the AL2023 one as 25G) — parse the unit, don't assume
+# G, or the disk is never grown and the guest boots onto a full root fs (sshd
+# then fails to start). cloud-init growpart expands the filesystem on first boot.
+CUR_SIZE="$(qm config "$VMID" | sed -n 's/^scsi0:.*size=\([0-9.]\+[KMGT]\?\).*/\1/p')"
+CUR_GB="$(printf '%s' "$CUR_SIZE" | awk '/[0-9]/{
+  u=substr($0,length($0),1); n=$0+0;
+  if(u=="T") n*=1024; else if(u=="M") n/=1024; else if(u=="K") n/=1024*1024;
+  printf("%d", n);
+}')"
 if [ -n "$CUR_GB" ] && [ "$DISK_GB" -gt "$CUR_GB" ]; then
-  echo ">> Resizing scsi0 from ${CUR_GB}G to ${DISK_GB}G"
+  echo ">> Resizing scsi0 from ${CUR_SIZE} to ${DISK_GB}G"
   qm disk resize "$VMID" scsi0 "${DISK_GB}G"
-elif [ -n "$CUR_GB" ] && [ "$DISK_GB" -lt "$CUR_GB" ]; then
-  echo ">> Requested ${DISK_GB}G < template ${CUR_GB}G; keeping ${CUR_GB}G (cannot shrink)."
+elif [ -n "$CUR_GB" ]; then
+  echo ">> scsi0 is ${CUR_SIZE} (~${CUR_GB}G); requested ${DISK_GB}G is not larger — leaving as is."
 fi
 
 # Store owner metadata in VM description so we can enforce per-user ops later.
